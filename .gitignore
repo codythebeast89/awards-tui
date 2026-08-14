@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.csv
+.DS_Store
+credentials.json
+client_secret.json
+oauth_credentials.json
+client_secret*.json
+token.json
+service_account.json
+service-account.json
+*.pem
+.env
