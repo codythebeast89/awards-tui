@@ -48,7 +48,9 @@ Type a username → **Enter**. **Tab** toggles search ↔ list focus.
 | a | Add award for current user |
 | e | Edit selected award cell |
 | d | Delete selected award (type `delete` to confirm) |
-| ↑ / ↓ | Move selection / scroll |
+| ← / → | Move cursor in search, edit, and other text fields |
+| Home / End | Jump to start / end of the text field |
+| Backspace / Del | Delete behind or in front of the cursor |
 | F5 / Ctrl+R | Refresh sheet data |
 | Esc | Clear search / cancel modal / quit |
 | q | Quit (search focus, empty input only) |

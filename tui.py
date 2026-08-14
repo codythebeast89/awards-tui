@@ -64,6 +64,7 @@ class AwardsTUI:
         self.mode = "main"  # main | add | edit | confirm_delete
         self.modal_input = ""
         self.modal_filter = ""
+        self.cursor = 0
         self.add_candidates: list[AwardDef] = []
         self.add_selected = 0
         self.add_step = "pick"  # pick | suffix
@@ -74,6 +75,48 @@ class AwardsTUI:
 
     def all_entries(self) -> list[Award]:
         return self.results + self.duplicates
+
+    def _clamp_cursor(self, text: str) -> None:
+        self.cursor = max(0, min(self.cursor, len(text)))
+
+    def _apply_text_key(self, key: int, text: str) -> tuple[str, bool]:
+        """Insert/delete/move in `text` at `self.cursor`. Returns (text, handled)."""
+        self._clamp_cursor(text)
+        if key == curses.KEY_LEFT:
+            self.cursor = max(0, self.cursor - 1)
+            return text, True
+        if key == curses.KEY_RIGHT:
+            self.cursor = min(len(text), self.cursor + 1)
+            return text, True
+        if key in (curses.KEY_HOME, 1):  # Home / Ctrl+A
+            self.cursor = 0
+            return text, True
+        if key in (curses.KEY_END, 5):  # End / Ctrl+E
+            self.cursor = len(text)
+            return text, True
+        if key == curses.KEY_BACKSPACE or key in (127, 8):
+            if self.cursor > 0:
+                text = text[: self.cursor - 1] + text[self.cursor :]
+                self.cursor -= 1
+            return text, True
+        if key == curses.KEY_DC:
+            if self.cursor < len(text):
+                text = text[: self.cursor] + text[self.cursor + 1 :]
+            return text, True
+        if 32 <= key <= 126:
+            text = text[: self.cursor] + chr(key) + text[self.cursor :]
+            self.cursor += 1
+            return text, True
+        return text, False
+
+    def _place_cursor(self, y: int, x: int, text: str, field_x: int, max_x: int) -> None:
+        self._clamp_cursor(text)
+        curs_x = field_x + self.cursor
+        if y >= 0 and field_x <= curs_x < max_x:
+            try:
+                self.stdscr.move(y, curs_x)
+            except curses.error:
+                pass
 
     def start(self) -> None:
         for loc in ("en_US.UTF-8", "C.UTF-8", ""):
@@ -152,6 +195,7 @@ class AwardsTUI:
                     return False
                 if self.all_entries():
                     self.modal_input = ""
+                    self.cursor = 0
                     self.mode = "confirm_delete"
                 return False
             if key == ord("/"):
@@ -163,6 +207,7 @@ class AwardsTUI:
         if key == 27:
             if self.query:
                 self.query = ""
+                self.cursor = 0
                 self.results = []
                 self.duplicates = []
                 self.results_username = None
@@ -175,9 +220,9 @@ class AwardsTUI:
             if self.focus == "search":
                 self.lookup()
             return False
-        elif key == curses.KEY_BACKSPACE or key in (127, 8):
+        elif key == curses.KEY_BACKSPACE or key in (127, 8, curses.KEY_DC, curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_HOME, curses.KEY_END) or key in (1, 5):
             if self.focus == "search":
-                self.query = self.query[:-1]
+                self.query, _ = self._apply_text_key(key, self.query)
             return False
         elif key == curses.KEY_UP and self.focus == "search":
             self.scroll = max(0, self.scroll - 1)
@@ -204,9 +249,10 @@ class AwardsTUI:
                 if ch.lower() in ("a", "e", "d"):
                     return False
                 self.focus = "search"
-                self.query += ch
+                self.cursor = len(self.query)
+                self.query, _ = self._apply_text_key(key, self.query)
             else:
-                self.query += chr(key)
+                self.query, _ = self._apply_text_key(key, self.query)
         return False
 
     def _open_add(self) -> None:
@@ -226,6 +272,7 @@ class AwardsTUI:
         self.add_step = "pick"
         self.pending_award_def = None
         self.modal_input = ""
+        self.cursor = 0
         self.mode = "add"
         self.error = None
         self.status = f"Add award for @{self.results_username}"
@@ -245,15 +292,12 @@ class AwardsTUI:
             if key == 27:
                 self.add_step = "pick"
                 self.modal_input = ""
+                self.cursor = 0
                 return False
             if key in (curses.KEY_ENTER, 10, 13):
                 self._commit_add(self.modal_input)
                 return False
-            if key == curses.KEY_BACKSPACE or key in (127, 8):
-                self.modal_input = self.modal_input[:-1]
-                return False
-            if 32 <= key <= 126:
-                self.modal_input += chr(key)
+            self.modal_input, handled = self._apply_text_key(key, self.modal_input)
             return False
 
         # pick step
@@ -275,14 +319,11 @@ class AwardsTUI:
             self.pending_award_def = filtered[self.add_selected]
             self.add_step = "suffix"
             self.modal_input = ""
+            self.cursor = 0
             self.status = "Optional suffix (e.g. x2 or Master) — Enter to save blank"
             return False
-        if key == curses.KEY_BACKSPACE or key in (127, 8):
-            self.modal_filter = self.modal_filter[:-1]
-            self.add_selected = 0
-            return False
-        if 32 <= key <= 126:
-            self.modal_filter += chr(key)
+        self.modal_filter, handled = self._apply_text_key(key, self.modal_filter)
+        if handled and key not in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_HOME, curses.KEY_END, 1, 5):
             self.add_selected = 0
         return False
 
@@ -340,6 +381,7 @@ class AwardsTUI:
             return
         award = entries[self.selected]
         self.modal_input = award.cell or award.name
+        self.cursor = len(self.modal_input)
         self.mode = "edit"
         self.status = f"Edit row {award.row} (must start with username)"
 
@@ -351,11 +393,7 @@ class AwardsTUI:
         if key in (curses.KEY_ENTER, 10, 13):
             self._commit_edit()
             return False
-        if key == curses.KEY_BACKSPACE or key in (127, 8):
-            self.modal_input = self.modal_input[:-1]
-            return False
-        if 32 <= key <= 126:
-            self.modal_input += chr(key)
+        self.modal_input, _ = self._apply_text_key(key, self.modal_input)
         return False
 
     def _commit_edit(self) -> None:
@@ -406,15 +444,12 @@ class AwardsTUI:
         if key in (curses.KEY_ENTER, 10, 13):
             if self.modal_input.strip().lower() == "delete":
                 self.modal_input = ""
+                self.cursor = 0
                 self._commit_delete()
             else:
                 self.status = 'Type "delete" and press Enter to confirm'
             return False
-        if key == curses.KEY_BACKSPACE or key in (127, 8):
-            self.modal_input = self.modal_input[:-1]
-            return False
-        if 32 <= key <= 126:
-            self.modal_input += chr(key)
+        self.modal_input, _ = self._apply_text_key(key, self.modal_input)
         return False
 
     def _commit_delete(self) -> None:
@@ -606,13 +641,6 @@ class AwardsTUI:
         self._addstr(3, 1, "┌" + "─" * (w - 4) + "┐")
         self._addstr(4, 1, "│" + box[: w - 4].ljust(w - 4) + "│", search_attr)
         self._addstr(5, 1, "└" + "─" * (w - 4) + "┘")
-        if self.focus == "search":
-            curs_x = 1 + 1 + len(prompt) + len(self.query)
-            if curs_x < w - 2:
-                try:
-                    self.stdscr.move(4, curs_x)
-                except curses.error:
-                    pass
 
         help_line = "Enter lookup · Tab focus · a add · e edit · d delete · F5 refresh · q quit"
         self._addstr(h - 2, 1, help_line[: w - 2], curses.color_pair(3))
@@ -630,6 +658,9 @@ class AwardsTUI:
         for i, (text, style) in enumerate(visible):
             self._addstr(view_top + i, 2, text[: w - 3], style)
 
+        if self.focus == "search":
+            self._place_cursor(4, 2 + len(prompt), self.query, 2 + len(prompt), w - 1)
+
         self.stdscr.refresh()
 
     def _draw_add(self, h: int, w: int) -> None:
@@ -639,11 +670,11 @@ class AwardsTUI:
             name = self.pending_award_def.base_name if self.pending_award_def else ""
             self._addstr(2, 2, f"Award: {name}"[: w - 3], curses.A_BOLD)
             self._addstr(4, 2, "Suffix (optional):", curses.color_pair(1))
-            self._addstr(5, 2, (self.modal_input + "█")[: w - 4], curses.A_BOLD)
+            self._addstr(5, 2, self.modal_input[: w - 4], curses.A_BOLD)
             self._addstr(7, 2, "Examples: x2   Master   \"Bronze Oak Leaf\"", curses.A_DIM)
-            self._addstr(h - 2, 1, "Enter save · Esc back", curses.color_pair(3))
+            self._addstr(h - 2, 1, "←/→ move · Backspace/Del · Enter save · Esc back", curses.color_pair(3))
         else:
-            self._addstr(2, 2, f"Filter: {self.modal_filter}█"[: w - 3], curses.A_BOLD)
+            self._addstr(2, 2, f"Filter: {self.modal_filter}"[: w - 3], curses.A_BOLD)
             filtered = self._filtered_add_candidates()
             if self.add_selected >= len(filtered):
                 self.add_selected = max(0, len(filtered) - 1)
@@ -658,6 +689,10 @@ class AwardsTUI:
         status = self.error or self.status
         attr = curses.color_pair(4) if self.error else curses.color_pair(2)
         self._addstr(h - 1, 0, status[:w].ljust(w), attr | curses.A_BOLD)
+        if self.add_step == "suffix":
+            self._place_cursor(5, 2, self.modal_input, 2, w - 1)
+        else:
+            self._place_cursor(2, 2 + len("Filter: "), self.modal_filter, 2 + len("Filter: "), w - 1)
 
     def _draw_edit(self, h: int, w: int) -> None:
         entries = self.all_entries()
@@ -668,12 +703,13 @@ class AwardsTUI:
             self._addstr(2, 2, f"{award.name}"[: w - 3], curses.A_BOLD)
             self._addstr(3, 2, f"{award.sheet} · row {award.row}"[: w - 3], curses.color_pair(1))
         self._addstr(5, 2, "Cell value:", curses.A_DIM)
-        self._addstr(6, 2, (self.modal_input + "█")[: w - 4], curses.A_BOLD)
+        self._addstr(6, 2, self.modal_input[: w - 4], curses.A_BOLD)
         self._addstr(8, 2, 'Format: Username   or   Username x2   or   Username - detail', curses.A_DIM)
-        self._addstr(h - 2, 1, "Enter save · Esc cancel", curses.color_pair(3))
+        self._addstr(h - 2, 1, "←/→ move · Home/End · Backspace/Del · Enter save · Esc cancel", curses.color_pair(3))
         status = self.error or self.status
         attr = curses.color_pair(4) if self.error else curses.color_pair(2)
         self._addstr(h - 1, 0, status[:w].ljust(w), attr | curses.A_BOLD)
+        self._place_cursor(6, 2, self.modal_input, 2, w - 1)
 
     def _draw_confirm_delete(self, h: int, w: int) -> None:
         entries = self.all_entries()
@@ -684,9 +720,10 @@ class AwardsTUI:
         loc = f"row {award.row}" if award else ""
         self._addstr(4, 2, f"Remove {name} ({loc}) from @{self.results_username}?"[: w - 3], curses.color_pair(4) | curses.A_BOLD)
         self._addstr(6, 2, 'Type "delete" to confirm:', curses.A_DIM)
-        self._addstr(7, 2, (self.modal_input + "█")[: w - 4], curses.A_BOLD)
+        self._addstr(7, 2, self.modal_input[: w - 4], curses.A_BOLD)
         self._addstr(h - 2, 1, "Enter confirm · Esc cancel", curses.color_pair(3))
         self._addstr(h - 1, 0, (self.error or self.status or "")[:w].ljust(w), curses.color_pair(3))
+        self._place_cursor(7, 2, self.modal_input, 2, w - 1)
 
     def _result_lines(self) -> list[tuple[str, int]]:
         if self.results_username is None:
