@@ -5,9 +5,30 @@ from __future__ import annotations
 
 import curses
 import locale
+import os
+import sys
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+
+
+def _reexec_venv_if_needed() -> None:
+    try:
+        import googleapiclient  # noqa: F401
+        return
+    except ImportError:
+        pass
+    venv_python = Path(__file__).resolve().parent / ".venv" / "bin" / "python"
+    if not venv_python.is_file():
+        return
+    if Path(sys.executable).resolve() == venv_python.resolve():
+        return
+    os.execv(str(venv_python), [str(venv_python), *sys.argv])
+
+
+if __name__ == "__main__":
+    _reexec_venv_if_needed()
 
 from awards import (
     CATEGORY_LABELS,

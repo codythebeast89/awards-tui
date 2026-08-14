@@ -19,6 +19,70 @@ def test_normalize() -> None:
     assert normalize_username("@FooBar_1 - x2") == "foobar_1"
     assert normalize_username("Alice") == "alice"
     assert normalize_username("") is None
+    assert normalize_username("\u200b\u200bamongus400and20") == "amongus400and20"
+    assert normalize_username("Alice  ") == "alice"
+
+
+def test_usernames_similar() -> None:
+    from awards import usernames_similar
+
+    assert usernames_similar("codythebeast89", "codythebast89")
+    assert not usernames_similar("codythebeast89", "totallydifferent")
+    # Mid-string typo on a long name (prefix rule used to miss these)
+    assert usernames_similar("rangers_apprentice122", "rangers_aprentice122")
+    assert usernames_similar("thundebolt_rblx", "thunderbolt_rblx")
+
+
+def test_cell_format_issues() -> None:
+    from awards import cell_format_issues
+
+    assert "missing_space_before_dash" in cell_format_issues("codythebeast89- Master")
+    assert "extra_spaces" in cell_format_issues("user  - x2")
+    assert cell_format_issues("Alice  ") == []
+    assert cell_format_issues("Alice") == []
+
+
+def test_find_duplicates_for_user() -> None:
+    from awards import AwardsData, find_duplicates_for_user
+
+    rows = [
+        ["", "", "hdr"],
+        ["", "", "x"],
+        ["", "", "Army Parachutist Badge"],
+        ["", "", "codythebeast89"],
+        ["", "", "codythebeast89"],
+        ["", "", "codythebast89- Master"],
+        ["", "", "codythebeast89 - Master"],
+    ]
+    data = AwardsData(
+        index={},
+        catalog=[],
+        sheet_rows={"Badges Database": rows},
+    )
+    hits = find_duplicates_for_user(data, "codythebeast89")
+    reasons = {h.reason for h in hits}
+    assert "duplicate_conflict" in reasons
+    assert "similar_username" in reasons
+    assert "malformed_cell" in reasons
+
+
+def test_duplicate_identical_vs_conflict() -> None:
+    from awards import AwardsData, collect_sheet_audit
+
+    rows = [
+        ["", "", "hdr"],
+        ["", "", "x"],
+        ["", "", "Army Parachutist Badge"],
+        ["", "", "alice"],
+        ["", "", "alice"],
+        ["", "", "bob - Basic"],
+        ["", "", "bob - Master"],
+    ]
+    data = AwardsData(index={}, catalog=[], sheet_rows={"Badges Database": rows})
+    report = collect_sheet_audit(data)
+    kinds = {(g["user"], g["kind"]) for g in report["duplicate_groups"]}
+    assert ("alice", "identical") in kinds
+    assert ("bob", "conflict") in kinds
 
 
 def test_format_ribbon() -> None:
@@ -117,43 +181,6 @@ def test_badges_row_offset() -> None:
     assert csv_index_to_sheet_row("Ribbons Database", 49) == 50
 
 
-def test_usernames_similar() -> None:
-    from awards import usernames_similar
-
-    assert usernames_similar("codythebeast89", "codythebast89")
-    assert not usernames_similar("codythebeast89", "totallydifferent")
-
-
-def test_cell_format_issues() -> None:
-    from awards import cell_format_issues
-
-    assert "missing_space_before_dash" in cell_format_issues("codythebeast89- Master")
-    assert "extra_spaces" in cell_format_issues("user  - x2")
-
-
-def test_find_duplicates_for_user() -> None:
-    from awards import AwardsData, find_duplicates_for_user
-
-    rows = [
-        ["", "", "hdr"],
-        ["", "", "x"],
-        ["", "", "Army Parachutist Badge"],
-        ["", "", "codythebeast89"],
-        ["", "", "codythebeast89"],
-        ["", "", "codythebast89- Master"],
-    ]
-    data = AwardsData(
-        index={},
-        catalog=[],
-        sheet_rows={"Badges Database": rows},
-    )
-    hits = find_duplicates_for_user(data, "codythebeast89")
-    reasons = {h.reason for h in hits}
-    assert "duplicate_in_column" in reasons
-    assert "similar_username" in reasons
-    assert "malformed_cell" in reasons
-
-
 def test_flatten_order() -> None:
     awards = [
         Award("foreign", "Zulu"),
@@ -179,5 +206,6 @@ if __name__ == "__main__":
     test_usernames_similar()
     test_cell_format_issues()
     test_find_duplicates_for_user()
+    test_duplicate_identical_vs_conflict()
     test_flatten_order()
     print("All offline tests passed.")

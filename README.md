@@ -32,9 +32,10 @@ That writes `token.json` (gitignored). Check status anytime with `python3 main.p
 ## Run
 
 ```bash
-source .venv/bin/activate   # if you created a venv
 python3 main.py
 ```
+
+If you created `.venv`, `python3 main.py` will use it automatically (needed for add/edit/delete). You can also activate it yourself: `source .venv/bin/activate`.
 
 Type a username → **Enter**. **Tab** toggles search ↔ list focus.
 
@@ -52,7 +53,14 @@ Type a username → **Enter**. **Tab** toggles search ↔ list focus.
 | Esc | Clear search / cancel modal / quit |
 | q | Quit (search focus, empty input only) |
 
-When you look up a user, duplicates and typos (same column listed twice, similar usernames like `codythebast89`, malformed cells like `user- Master`) appear in a red **Duplicates / typos** section. You can edit or delete those entries the same way as normal awards.
+When you look up a user, duplicates and typos appear in a red **Duplicates / typos** section:
+identical copies, conflicting details in the same column (for example CSIB units on separate rows), similar usernames, and malformed cells like `user- Master`. You can edit or delete those entries the same way as normal awards.
+
+Database-wide read-only scan (does not write):
+
+```bash
+python3 main.py --audit
+```
 
 ### One-shot CLI
 

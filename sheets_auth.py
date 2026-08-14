@@ -119,7 +119,12 @@ def login() -> str:
 
 
 def build_sheets_service(*, interactive: bool = True):
-    from googleapiclient.discovery import build
+    try:
+        from googleapiclient.discovery import build
+    except ImportError as exc:
+        raise AuthError(
+            "Missing googleapiclient. Activate .venv or run: pip install -r requirements.txt"
+        ) from exc
 
     creds = get_credentials(interactive=interactive)
     return build("sheets", "v4", credentials=creds, cache_discovery=False)

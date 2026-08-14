@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 SHEET_ID = "1e_AqHIGrGdfNSgoHt6kLV89E6LADJmlZzhfRAUXo0wY"
-USER_AGENT = "awards-tui/1.1 (decorations lookup + edit)"
+USER_AGENT = "awards-tui/1.2 (decorations lookup + edit)"
 
 SHEET_META = {
     "Ribbons Database": {"category": "ribbons", "name_row": 2, "data_start_row": 3, "row_offset": 0},
@@ -66,10 +66,12 @@ class DuplicateHit:
     row: int
     cell: str
     cell_username: str
-    reason: str  # duplicate_in_column | similar_username | malformed_cell
+    reason: str  # duplicate_identical | duplicate_conflict | similar_username | malformed_cell
 
     def to_award(self) -> Award:
         label = {
+            "duplicate_identical": "duplicate copy",
+            "duplicate_conflict": "conflicting rows",
             "duplicate_in_column": "duplicate row",
             "similar_username": f"similar to @{self.cell_username}",
             "malformed_cell": "malformed cell",
@@ -122,10 +124,21 @@ def index_to_col(idx: int) -> str:
     return "".join(reversed(letters))
 
 
-def normalize_username(cell: str | None) -> str | None:
+_INVISIBLE_CHARS = dict.fromkeys(map(ord, "\u200b\u200c\u200d\ufeff"), None)
+
+
+def clean_cell(cell: str | None) -> str:
+    """Strip zero-width characters and surrounding whitespace."""
     if not cell:
+        return ""
+    return str(cell).translate(_INVISIBLE_CHARS).strip()
+
+
+def normalize_username(cell: str | None) -> str | None:
+    text = clean_cell(cell)
+    if not text:
         return None
-    match = re.match(r"^@?([A-Za-z0-9_]+)", cell.strip())
+    match = re.match(r"^@?([A-Za-z0-9_]+)", text)
     return match.group(1).lower() if match else None
 
 
@@ -135,27 +148,28 @@ def usernames_similar(a: str, b: str) -> bool:
         return False
     if abs(len(a) - len(b)) > 3:
         return False
-    # Require strong similarity and a shared prefix so random names don't match.
     prefix = 0
     for x, y in zip(a, b, strict=False):
         if x != y:
             break
         prefix += 1
+    ratio = difflib.SequenceMatcher(None, a, b).ratio()
+    # Long names with a mid-string typo share a short prefix but a very high ratio.
+    if ratio >= 0.90 and prefix >= 3:
+        return True
     if prefix < max(4, int(min(len(a), len(b)) * 0.55)):
         return False
-    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.84
+    return ratio >= 0.84
 
 
 def cell_format_issues(cell: str) -> list[str]:
-    """Detect common sheet entry formatting problems."""
-    text = cell.strip()
+    """Detect real entry problems. Trailing space / ZWSP are cleaned, not flagged."""
+    text = clean_cell(cell)
     issues: list[str] = []
     if re.search(r"[A-Za-z0-9_]-", text):
         issues.append("missing_space_before_dash")
     if "  " in text:
         issues.append("extra_spaces")
-    if text != cell:
-        issues.append("trailing_space")
     return issues
 
 
@@ -216,10 +230,9 @@ def find_duplicates_for_user(data: AwardsData, username: str) -> list[DuplicateH
         col_key = (sheet, col)
         for r in range(meta["data_start_row"] - 1, len(rows)):
             row = rows[r]
-            cell = row[col_idx] if col_idx < len(row) else ""
-            if not cell or not str(cell).strip():
+            cell = clean_cell(row[col_idx] if col_idx < len(row) else "")
+            if not cell:
                 continue
-            cell = str(cell).strip()
             cell_user = normalize_username(cell)
             if not cell_user:
                 continue
@@ -270,6 +283,8 @@ def find_duplicates_for_user(data: AwardsData, username: str) -> list[DuplicateH
         col_idx = col_to_index(col)
         rows = data.sheet_rows[sheet]
         base_name = rows[meta["name_row"] - 1][col_idx].strip()
+        cells_folded = {cell.casefold() for _row, cell, _user in entries}
+        reason = "duplicate_identical" if len(cells_folded) == 1 else "duplicate_conflict"
         for sheet_row, cell, cell_user in entries:
             add_hit(
                 category=meta["category"],
@@ -279,7 +294,7 @@ def find_duplicates_for_user(data: AwardsData, username: str) -> list[DuplicateH
                 row=sheet_row,
                 cell=cell,
                 cell_username=cell_user,
-                reason="duplicate_in_column",
+                reason=reason,
             )
 
     hits.sort(key=lambda h: (h.reason, h.base_name.casefold(), h.row))
@@ -470,10 +485,9 @@ def build_awards_data(columns: Iterable[dict] | None = None) -> AwardsData:
 
         for r in range(meta["data_start_row"] - 1, len(rows)):
             row = rows[r]
-            cell = row[col_idx] if col_idx < len(row) else ""
-            if not cell or not str(cell).strip():
+            cell = clean_cell(row[col_idx] if col_idx < len(row) else "")
+            if not cell:
                 continue
-            cell = str(cell)
             username = normalize_username(cell)
             name = format_award_name(meta["category"], base_name, cell)
             if name:
@@ -486,7 +500,7 @@ def build_awards_data(columns: Iterable[dict] | None = None) -> AwardsData:
                         sheet=sheet,
                         col=col,
                         row=csv_index_to_sheet_row(sheet, r),
-                        cell=cell.strip(),
+                        cell=cell,
                         base_name=base_name,
                     ),
                 )
@@ -521,3 +535,100 @@ def flatten_awards_sorted(awards: list[Award]) -> list[Award]:
         awards,
         key=lambda a: (order.get(a.category, 99), a.name.casefold()),
     )
+
+
+def collect_sheet_audit(data: AwardsData) -> dict:
+    """Read-only scan for duplicates, similar names, and malformed cells."""
+    from collections import defaultdict
+
+    by_col: dict[tuple[str, str, str], list[tuple[int, str, str]]] = defaultdict(list)
+    unparsed: list[tuple[str, str, str, int, str]] = []
+    malformed: list[tuple[str, str, str, int, str, list[str]]] = []
+
+    for entry in load_columns():
+        sheet = entry["sheet"]
+        col = entry["col"]
+        meta = SHEET_META.get(sheet)
+        rows = data.sheet_rows.get(sheet)
+        if not meta or not rows:
+            continue
+        col_idx = col_to_index(col)
+        name_row = rows[meta["name_row"] - 1] if len(rows) >= meta["name_row"] else []
+        base_name = (name_row[col_idx] or "").strip() if col_idx < len(name_row) else ""
+        if not base_name:
+            continue
+        for r in range(meta["data_start_row"] - 1, len(rows)):
+            raw = rows[r][col_idx] if col_idx < len(rows[r]) else ""
+            if not raw:
+                continue
+            cell = clean_cell(raw)
+            if not cell:
+                continue
+            user = normalize_username(cell)
+            sheet_row = csv_index_to_sheet_row(sheet, r)
+            if not user:
+                unparsed.append((sheet, col, base_name, sheet_row, repr(raw)))
+                continue
+            by_col[(sheet, col, base_name)].append((sheet_row, cell, user))
+            issues = cell_format_issues(cell)
+            if issues:
+                malformed.append((sheet, col, base_name, sheet_row, cell, issues))
+
+    duplicate_groups: list[dict] = []
+    for (sheet, col, base_name), recs in by_col.items():
+        by_user: dict[str, list[tuple[int, str]]] = defaultdict(list)
+        for sheet_row, cell, user in recs:
+            by_user[user].append((sheet_row, cell))
+        for user, hits in by_user.items():
+            if len(hits) < 2:
+                continue
+            cells = {c.casefold() for _row, c in hits}
+            duplicate_groups.append(
+                {
+                    "user": user,
+                    "sheet": sheet,
+                    "col": col,
+                    "base_name": base_name,
+                    "kind": "identical" if len(cells) == 1 else "conflict",
+                    "rows": hits,
+                }
+            )
+
+    similar_pairs: list[dict] = []
+    seen_pair: set[tuple[str, str, str, str]] = set()
+    for (sheet, col, base_name), recs in by_col.items():
+        users = sorted({u for _r, _c, u in recs})
+        buckets: dict[str, list[str]] = defaultdict(list)
+        for name in users:
+            buckets[name[:4] if len(name) >= 4 else name].append(name)
+        for group in buckets.values():
+            uniq = sorted(set(group))
+            for i, a in enumerate(uniq):
+                for b in uniq[i + 1 :]:
+                    if not usernames_similar(a, b):
+                        continue
+                    sig = (sheet, col, a, b)
+                    if sig in seen_pair:
+                        continue
+                    seen_pair.add(sig)
+                    similar_pairs.append(
+                        {
+                            "a": a,
+                            "b": b,
+                            "sheet": sheet,
+                            "col": col,
+                            "base_name": base_name,
+                        }
+                    )
+
+    return {
+        "cells": sum(len(v) for v in by_col.values()),
+        "columns": len(by_col),
+        "duplicate_groups": sorted(
+            duplicate_groups,
+            key=lambda g: (-len(g["rows"]), g["user"], g["base_name"].casefold()),
+        ),
+        "similar_pairs": sorted(similar_pairs, key=lambda p: (p["base_name"].casefold(), p["a"], p["b"])),
+        "malformed": malformed,
+        "unparsed": unparsed,
+    }

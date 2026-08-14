@@ -4,11 +4,32 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+from pathlib import Path
+
+
+def _reexec_venv_if_needed() -> None:
+    """Use project .venv when system Python is missing Google API packages."""
+    try:
+        import googleapiclient  # noqa: F401
+        return
+    except ImportError:
+        pass
+    venv_python = Path(__file__).resolve().parent / ".venv" / "bin" / "python"
+    if not venv_python.is_file():
+        return
+    if Path(sys.executable).resolve() == venv_python.resolve():
+        return
+    os.execv(str(venv_python), [str(venv_python), *sys.argv])
+
+
+_reexec_venv_if_needed()
 
 from awards import (
     CATEGORY_LABELS,
     build_awards_data,
+    collect_sheet_audit,
     get_awards_for_username,
     group_awards,
 )
@@ -59,6 +80,54 @@ def cmd_auth_status() -> int:
     return 0
 
 
+def cmd_audit() -> int:
+    """Read-only duplicate / typo report. Does not write to the sheet."""
+    print("Syncing awards from Google Sheets (read-only)…", file=sys.stderr)
+    data = build_awards_data()
+    report = collect_sheet_audit(data)
+    groups = report["duplicate_groups"]
+    identical = sum(1 for g in groups if g["kind"] == "identical")
+    conflict = sum(1 for g in groups if g["kind"] == "conflict")
+    print(f"Columns: {report['columns']}  Cells: {report['cells']}")
+    print(
+        f"Duplicate groups: {len(groups)} "
+        f"(identical copies {identical}, conflicting details {conflict})"
+    )
+    print(f"Similar-username pairs (same column): {len(report['similar_pairs'])}")
+    print(f"Malformed cells: {len(report['malformed'])}")
+    print(f"Unparseable cells: {len(report['unparsed'])}")
+    print()
+    print("=== Identical copies (same user, same award, same text) ===")
+    for g in groups:
+        if g["kind"] != "identical":
+            continue
+        rows = ", ".join(f"row {row}" for row, _cell in g["rows"])
+        print(f"  @{g['user']}  {g['base_name']}  [{g['sheet']} {g['col']}]  {rows}")
+    print()
+    print("=== Conflicting rows (same user, same award, different text) ===")
+    for g in groups:
+        if g["kind"] != "conflict":
+            continue
+        print(f"  @{g['user']}  {g['base_name']}  [{g['sheet']} {g['col']}]")
+        for row, cell in g["rows"]:
+            print(f"    row {row}: {cell}")
+    print()
+    print("=== Similar usernames in the same award column ===")
+    for p in report["similar_pairs"]:
+        print(f"  {p['a']} ~ {p['b']}  {p['base_name']}  [{p['sheet']} {p['col']}]")
+    if report["malformed"]:
+        print()
+        print("=== Malformed cells ===")
+        for sheet, col, base, row, cell, issues in report["malformed"]:
+            print(f"  [{sheet} {col} row {row}] {base}: {cell!r}  {issues}")
+    if report["unparsed"]:
+        print()
+        print("=== Unparseable cells ===")
+        for sheet, col, base, row, cell in report["unparsed"]:
+            print(f"  [{sheet} {col} row {row}] {base}: {cell}")
+    return 0
+
+
 def cmd_add(username: str, award_query: str, suffix: str) -> int:
     from sheets_edit import add_award_to_user
 
@@ -98,6 +167,11 @@ def main() -> int:
     parser.add_argument("--cli", action="store_true", help="Force non-interactive lookup.")
     parser.add_argument("--login", action="store_true", help="Authorize Google Sheets write access via OAuth.")
     parser.add_argument("--auth-status", action="store_true", help="Show credential / login status.")
+    parser.add_argument(
+        "--audit",
+        action="store_true",
+        help="Read-only scan for duplicate rows, similar usernames, and malformed cells.",
+    )
     parser.add_argument("--add", metavar="AWARD", help="Add award by name (with username).")
     parser.add_argument("--suffix", default="", help="Optional cell suffix when using --add (e.g. x2).")
     args = parser.parse_args()
@@ -106,6 +180,8 @@ def main() -> int:
         return cmd_login()
     if args.auth_status:
         return cmd_auth_status()
+    if args.audit:
+        return cmd_audit()
     if args.add:
         if not args.username:
             parser.error("username is required with --add")
