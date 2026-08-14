@@ -12,4 +12,5 @@ token.json
 service_account.json
 service-account.json
 *.pem
-.env
+audits/
+audit-*.txt

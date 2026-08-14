@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -28,8 +29,10 @@ _reexec_venv_if_needed()
 
 from awards import (
     CATEGORY_LABELS,
+    ROOT,
     build_awards_data,
     collect_sheet_audit,
+    format_audit_report,
     get_awards_for_username,
     group_awards,
 )
@@ -80,51 +83,31 @@ def cmd_auth_status() -> int:
     return 0
 
 
-def cmd_audit() -> int:
-    """Read-only duplicate / typo report. Does not write to the sheet."""
+def cmd_audit(out_path: str | None = None) -> int:
+    """Read-only duplicate / typo report. Writes a .txt file; does not write to the sheet."""
     print("Syncing awards from Google Sheets (read-only)…", file=sys.stderr)
     data = build_awards_data()
     report = collect_sheet_audit(data)
+    generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    body = format_audit_report(report, generated)
+
+    if out_path:
+        dest = Path(out_path).expanduser()
+    else:
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
+        dest = ROOT / "audits" / f"audit-{stamp}.txt"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(body, encoding="utf-8")
+
     groups = report["duplicate_groups"]
     identical = sum(1 for g in groups if g["kind"] == "identical")
     conflict = sum(1 for g in groups if g["kind"] == "conflict")
-    print(f"Columns: {report['columns']}  Cells: {report['cells']}")
+    print(f"Wrote {dest}")
     print(
-        f"Duplicate groups: {len(groups)} "
-        f"(identical copies {identical}, conflicting details {conflict})"
+        f"{report['columns']} columns · {report['cells']} cells · "
+        f"{identical} identical copies · {conflict} conflicting · "
+        f"{len(report['similar_pairs'])} similar · {len(report['malformed'])} malformed"
     )
-    print(f"Similar-username pairs (same column): {len(report['similar_pairs'])}")
-    print(f"Malformed cells: {len(report['malformed'])}")
-    print(f"Unparseable cells: {len(report['unparsed'])}")
-    print()
-    print("=== Identical copies (same user, same award, same text) ===")
-    for g in groups:
-        if g["kind"] != "identical":
-            continue
-        rows = ", ".join(f"row {row}" for row, _cell in g["rows"])
-        print(f"  @{g['user']}  {g['base_name']}  [{g['sheet']} {g['col']}]  {rows}")
-    print()
-    print("=== Conflicting rows (same user, same award, different text) ===")
-    for g in groups:
-        if g["kind"] != "conflict":
-            continue
-        print(f"  @{g['user']}  {g['base_name']}  [{g['sheet']} {g['col']}]")
-        for row, cell in g["rows"]:
-            print(f"    row {row}: {cell}")
-    print()
-    print("=== Similar usernames in the same award column ===")
-    for p in report["similar_pairs"]:
-        print(f"  {p['a']} ~ {p['b']}  {p['base_name']}  [{p['sheet']} {p['col']}]")
-    if report["malformed"]:
-        print()
-        print("=== Malformed cells ===")
-        for sheet, col, base, row, cell, issues in report["malformed"]:
-            print(f"  [{sheet} {col} row {row}] {base}: {cell!r}  {issues}")
-    if report["unparsed"]:
-        print()
-        print("=== Unparseable cells ===")
-        for sheet, col, base, row, cell in report["unparsed"]:
-            print(f"  [{sheet} {col} row {row}] {base}: {cell}")
     return 0
 
 
@@ -170,7 +153,12 @@ def main() -> int:
     parser.add_argument(
         "--audit",
         action="store_true",
-        help="Read-only scan for duplicate rows, similar usernames, and malformed cells.",
+        help="Read-only scan for duplicates; writes a timestamped .txt report under audits/.",
+    )
+    parser.add_argument(
+        "--audit-out",
+        metavar="FILE",
+        help="Write the --audit report to FILE instead of audits/audit-TIMESTAMP.txt.",
     )
     parser.add_argument("--add", metavar="AWARD", help="Add award by name (with username).")
     parser.add_argument("--suffix", default="", help="Optional cell suffix when using --add (e.g. x2).")
@@ -180,8 +168,8 @@ def main() -> int:
         return cmd_login()
     if args.auth_status:
         return cmd_auth_status()
-    if args.audit:
-        return cmd_audit()
+    if args.audit or args.audit_out:
+        return cmd_audit(args.audit_out)
     if args.add:
         if not args.username:
             parser.error("username is required with --add")

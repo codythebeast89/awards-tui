@@ -632,3 +632,114 @@ def collect_sheet_audit(data: AwardsData) -> dict:
         "malformed": malformed,
         "unparsed": unparsed,
     }
+
+
+def format_audit_report(report: dict, generated_at: str) -> str:
+    """Plain-text audit report for saving to a .txt file."""
+    groups = report["duplicate_groups"]
+    identical = [g for g in groups if g["kind"] == "identical"]
+    conflict = [g for g in groups if g["kind"] == "conflict"]
+    similar = report["similar_pairs"]
+    malformed = report["malformed"]
+    unparsed = report["unparsed"]
+    lines: list[str] = [
+        "Decorations Database — duplicate audit",
+        f"Generated: {generated_at}",
+        "Mode: read-only (no sheet writes)",
+        "",
+        "SUMMARY",
+        "=======",
+        f"Award columns scanned: {report['columns']}",
+        f"Filled cells:          {report['cells']}",
+        f"Identical copies:      {len(identical)} groups",
+        f"Conflicting rows:      {len(conflict)} groups",
+        f"Similar usernames:     {len(similar)} pairs (same award column)",
+        f"Malformed cells:       {len(malformed)}",
+        f"Unparseable cells:     {len(unparsed)}",
+        "",
+    ]
+
+    def section(title: str, blurb: str) -> None:
+        lines.append(title)
+        lines.append("-" * len(title))
+        lines.append(blurb)
+        lines.append("")
+
+    section(
+        "1. Identical copies",
+        "Same username appears more than once in the same award column with the same text.",
+    )
+    if not identical:
+        lines.append("(none)")
+        lines.append("")
+    else:
+        for g in identical:
+            rows = ", ".join(str(row) for row, _cell in g["rows"])
+            cell = g["rows"][0][1]
+            lines.append(f"@{g['user']}")
+            lines.append(f"  Award:  {g['base_name']}")
+            lines.append(f"  Sheet:  {g['sheet']}  Column: {g['col']}")
+            lines.append(f"  Rows:   {rows}")
+            lines.append(f"  Cell:   {cell}")
+            lines.append("")
+
+    section(
+        "2. Conflicting rows",
+        "Same username appears more than once in the same award column with different cell text.",
+    )
+    if not conflict:
+        lines.append("(none)")
+        lines.append("")
+    else:
+        for g in conflict:
+            lines.append(f"@{g['user']}")
+            lines.append(f"  Award:  {g['base_name']}")
+            lines.append(f"  Sheet:  {g['sheet']}  Column: {g['col']}")
+            for row, cell in g["rows"]:
+                lines.append(f"  Row {row}: {cell}")
+            lines.append("")
+
+    section(
+        "3. Similar usernames",
+        "Two usernames in the same award column look like typos of each other.",
+    )
+    if not similar:
+        lines.append("(none)")
+        lines.append("")
+    else:
+        for p in similar:
+            lines.append(f"{p['a']}  ~  {p['b']}")
+            lines.append(f"  Award:  {p['base_name']}")
+            lines.append(f"  Sheet:  {p['sheet']}  Column: {p['col']}")
+            lines.append("")
+
+    section(
+        "4. Malformed cells",
+        "Missing space before a dash, or extra internal spaces. Trailing space is ignored.",
+    )
+    if not malformed:
+        lines.append("(none)")
+        lines.append("")
+    else:
+        for sheet, col, base, row, cell, issues in malformed:
+            issue = ", ".join(issues)
+            lines.append(f"@{normalize_username(cell) or '?'}  [{issue}]")
+            lines.append(f"  Award:  {base}")
+            lines.append(f"  Sheet:  {sheet}  Column: {col}  Row: {row}")
+            lines.append(f"  Cell:   {cell}")
+            lines.append("")
+
+    section("5. Unparseable cells", "Could not extract a username from the cell.")
+    if not unparsed:
+        lines.append("(none)")
+        lines.append("")
+    else:
+        for sheet, col, base, row, cell in unparsed:
+            lines.append(f"  Sheet:  {sheet}  Column: {col}  Row: {row}")
+            lines.append(f"  Award:  {base}")
+            lines.append(f"  Cell:   {cell}")
+            lines.append("")
+
+    lines.append("End of report.")
+    lines.append("")
+    return "\n".join(lines)

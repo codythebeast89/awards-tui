@@ -67,7 +67,7 @@ def test_find_duplicates_for_user() -> None:
 
 
 def test_duplicate_identical_vs_conflict() -> None:
-    from awards import AwardsData, collect_sheet_audit
+    from awards import AwardsData, collect_sheet_audit, format_audit_report
 
     rows = [
         ["", "", "hdr"],
@@ -83,6 +83,12 @@ def test_duplicate_identical_vs_conflict() -> None:
     kinds = {(g["user"], g["kind"]) for g in report["duplicate_groups"]}
     assert ("alice", "identical") in kinds
     assert ("bob", "conflict") in kinds
+    text = format_audit_report(report, "2026-08-14 00:00:00 UTC")
+    assert "Decorations Database — duplicate audit" in text
+    assert "@alice" in text
+    assert "@bob" in text
+    assert "Row " in text
+    assert "End of report." in text
 
 
 def test_format_ribbon() -> None:

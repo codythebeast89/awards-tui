@@ -58,10 +58,11 @@ Type a username → **Enter**. **Tab** toggles search ↔ list focus.
 When you look up a user, duplicates and typos appear in a red **Duplicates / typos** section:
 identical copies, conflicting details in the same column (for example CSIB units on separate rows), similar usernames, and malformed cells like `user- Master`. You can edit or delete those entries the same way as normal awards.
 
-Database-wide read-only scan (does not write):
+Database-wide read-only scan (does not write to the sheet). Saves a clean report under `audits/`:
 
 ```bash
 python3 main.py --audit
+# optional: python3 main.py --audit-out ~/Desktop/decorations-audit.txt
 ```
 
 ### One-shot CLI
