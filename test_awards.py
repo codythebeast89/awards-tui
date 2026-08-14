@@ -171,13 +171,12 @@ def test_build_cell_value() -> None:
 
 def test_find_first_empty() -> None:
     rows = [
-        ["", "", "hdr"],
         ["", "", "Army Distinguished Service Cross"],
         ["", "", "user1"],
         ["", "", ""],
         ["", "", "user2"],
     ]
-    assert find_first_empty_row(rows, "Ribbons Database", "C") == 4
+    assert find_first_empty_row(rows, "Ribbons Database", "C") == 3
 
 
 def test_badges_row_offset() -> None:

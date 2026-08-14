@@ -18,7 +18,8 @@ SHEET_ID = "1e_AqHIGrGdfNSgoHt6kLV89E6LADJmlZzhfRAUXo0wY"
 USER_AGENT = "awards-tui/1.2 (decorations lookup + edit)"
 
 SHEET_META = {
-    "Ribbons Database": {"category": "ribbons", "name_row": 2, "data_start_row": 3, "row_offset": 0},
+    # Public CSV: row 1 = award titles, row 2+ = entries.
+    "Ribbons Database": {"category": "ribbons", "name_row": 1, "data_start_row": 2, "row_offset": 0},
     # Public CSV export for Badges is 6 rows shorter than the live sheet row numbers.
     "Badges Database": {"category": "badges", "name_row": 3, "data_start_row": 4, "row_offset": 6},
     "Foreign Awards Database": {"category": "foreign", "name_row": 2, "data_start_row": 3, "row_offset": 0},
