@@ -69,12 +69,23 @@ class AwardsTUI:
         self.add_selected = 0
         self.add_step = "pick"  # pick | suffix
         self.pending_award_def: AwardDef | None = None
+        self.pending_award: Award | None = None
         self._load_lock = threading.Lock()
         self._loading = False
         self._busy = False
 
     def all_entries(self) -> list[Award]:
         return self.results + self.duplicates
+
+    def _selected_entry(self) -> Award | None:
+        entries = self.all_entries()
+        if 0 <= self.selected < len(entries):
+            return entries[self.selected]
+        return self.pending_award
+
+    def _clamp_selected(self) -> None:
+        n = len(self.all_entries())
+        self.selected = min(self.selected, max(0, n - 1)) if n else 0
 
     def _clamp_cursor(self, text: str) -> None:
         self.cursor = max(0, min(self.cursor, len(text)))
@@ -194,6 +205,10 @@ class AwardsTUI:
                     self.status = "Wait for the current sheet operation to finish"
                     return False
                 if self.all_entries():
+                    award = self._selected_entry()
+                    if not award:
+                        return False
+                    self.pending_award = award
                     self.modal_input = ""
                     self.cursor = 0
                     self.mode = "confirm_delete"
@@ -376,10 +391,10 @@ class AwardsTUI:
         if self._busy:
             self.status = "Wait for the current sheet operation to finish"
             return
-        entries = self.all_entries()
-        if not entries:
+        award = self._selected_entry()
+        if not award:
             return
-        award = entries[self.selected]
+        self.pending_award = award
         self.modal_input = award.cell or award.name
         self.cursor = len(self.modal_input)
         self.mode = "edit"
@@ -388,6 +403,7 @@ class AwardsTUI:
     def _handle_edit(self, key: int) -> bool:
         if key == 27:
             self.mode = "main"
+            self.pending_award = None
             self.status = f"{self.results_username} · {len(self.results)} award(s)"
             return False
         if key in (curses.KEY_ENTER, 10, 13):
@@ -397,10 +413,9 @@ class AwardsTUI:
         return False
 
     def _commit_edit(self) -> None:
-        entries = self.all_entries()
-        if not entries or self._busy:
+        award = self.pending_award or self._selected_entry()
+        if not award or self._busy:
             return
-        award = entries[self.selected]
         new_cell = self.modal_input
 
         def worker() -> None:
@@ -409,6 +424,8 @@ class AwardsTUI:
             self.error = None
             try:
                 result = update_award_cell(award, new_cell, interactive_auth=False)
+                self.mode = "main"
+                self.pending_award = None
                 if result.ok and result.award:
                     if self.data and self.results_username:
                         key = self.results_username.lower()
@@ -429,7 +446,6 @@ class AwardsTUI:
                 else:
                     self.error = result.message
                     self.status = "Edit failed"
-                self.mode = "main"
             finally:
                 self._busy = False
 
@@ -438,6 +454,7 @@ class AwardsTUI:
     def _handle_confirm_delete(self, key: int) -> bool:
         if key == 27:
             self.modal_input = ""
+            self.pending_award = None
             self.mode = "main"
             self.status = f"{self.results_username} · {len(self.results)} award(s)"
             return False
@@ -453,10 +470,9 @@ class AwardsTUI:
         return False
 
     def _commit_delete(self) -> None:
-        entries = self.all_entries()
-        if not entries or self._busy:
+        award = self.pending_award or self._selected_entry()
+        if not award or self._busy:
             return
-        award = entries[self.selected]
 
         def worker() -> None:
             self._busy = True
@@ -464,6 +480,9 @@ class AwardsTUI:
             self.error = None
             try:
                 result = remove_award(award, interactive_auth=False)
+                # Leave confirm screen before list mutation so draw cannot race.
+                self.mode = "main"
+                self.pending_award = None
                 if result.ok:
                     if self.data and self.results_username:
                         key = self.results_username.lower()
@@ -478,7 +497,6 @@ class AwardsTUI:
                 else:
                     self.error = result.message
                     self.status = "Delete failed"
-                self.mode = "main"
             finally:
                 self._busy = False
 
@@ -527,7 +545,6 @@ class AwardsTUI:
         if self.data is None:
             self.status = "Still loading awards…"
             return
-        prev_selected = self.selected
         prev_scroll = self.scroll
         awards = flatten_awards_sorted(get_awards_for_username(self.data.index, username))
         dup_hits = find_duplicates_for_user(self.data, username)
@@ -535,7 +552,7 @@ class AwardsTUI:
         self.results = awards
         self.duplicates = [h.to_award() for h in dup_hits]
         if preserve_view:
-            self.selected = min(prev_selected, max(0, len(self.all_entries()) - 1))
+            self._clamp_selected()
             self.scroll = prev_scroll
         else:
             self.scroll = 0
@@ -592,7 +609,7 @@ class AwardsTUI:
                 min(prev_selected, max(0, len(entries) - 1)),
             )
         elif preserve_selection:
-            self.selected = min(prev_selected, max(0, len(self.all_entries()) - 1))
+            self._clamp_selected()
             self.scroll = prev_scroll
         self._ensure_selected_visible()
 
@@ -695,8 +712,7 @@ class AwardsTUI:
             self._place_cursor(2, 2 + len("Filter: "), self.modal_filter, 2 + len("Filter: "), w - 1)
 
     def _draw_edit(self, h: int, w: int) -> None:
-        entries = self.all_entries()
-        award = entries[self.selected] if entries else None
+        award = self.pending_award or self._selected_entry()
         title = " Edit award cell "
         self._addstr(0, max(0, (w - len(title)) // 2), title, curses.color_pair(5) | curses.A_BOLD)
         if award:
@@ -712,8 +728,7 @@ class AwardsTUI:
         self._place_cursor(6, 2, self.modal_input, 2, w - 1)
 
     def _draw_confirm_delete(self, h: int, w: int) -> None:
-        entries = self.all_entries()
-        award = entries[self.selected] if entries else None
+        award = self.pending_award or self._selected_entry()
         title = " Confirm delete "
         self._addstr(0, max(0, (w - len(title)) // 2), title, curses.color_pair(5) | curses.A_BOLD)
         name = award.name if award else "?"
