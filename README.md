@@ -1,6 +1,6 @@
 # Awards TUI
 
-Terminal UI to look up and edit awards in the [Decorations Database](https://docs.google.com/spreadsheets/d/1e_AqHIGrGdfNSgoHt6kLV89E6LADJmlZzhfRAUXo0wY) Google Sheet.
+Terminal UI (Textual) to look up and edit awards in the [Decorations Database](https://docs.google.com/spreadsheets/d/1e_AqHIGrGdfNSgoHt6kLV89E6LADJmlZzhfRAUXo0wY) Google Sheet.
 
 Tabs used:
 
@@ -35,30 +35,27 @@ That writes `token.json` (gitignored). Check status anytime with `python3 main.p
 python3 main.py
 ```
 
-If you created `.venv`, `python3 main.py` will use it automatically (needed for add/edit/delete). You can also activate it yourself: `source .venv/bin/activate`.
+If you created `.venv`, `python3 main.py` will use it automatically (needed for add/edit/delete and Textual). You can also activate it yourself: `source .venv/bin/activate`.
 
-Type a username → **Enter**. **Tab** toggles search ↔ list focus.
+The interactive UI is a purple dark Textual layout: username bar, fixed **Actions** pane, tabbed **Awards** list, and a **Detail** pane.
 
 ### TUI keys
 
 | Key | Action |
 |-----|--------|
-| Enter | Look up username |
-| Tab | Toggle search ↔ list focus |
+| Enter (in username) | Look up username |
 | a | Add award for current user |
 | e | Edit selected award cell |
 | d | Delete selected award (type `delete` to confirm) |
-| ← / → | Move cursor in search, edit, and other text fields |
-| Home / End | Jump to start / end of the text field |
-| Backspace / Del | Delete behind or in front of the cursor |
 | F5 / Ctrl+R | Refresh sheet data |
-| Esc | Clear search / cancel modal / quit |
-| q | Quit (search focus, empty input only) |
+| Ctrl+Q | Quit |
+| Esc | Cancel modal |
 
-When you look up a user, duplicates and typos appear in a red **Duplicates / typos** section:
-identical copies, conflicting details in the same column (for example CSIB units on separate rows), similar usernames, and malformed cells like `user- Master`. You can edit or delete those entries the same way as normal awards.
+Use the left **Actions** pane or Detail buttons for the same operations. Award tabs: All / Badges / Ribbons / Foreign / Duplicates.
 
-Database-wide read-only scan (does not write to the sheet). Saves a clean report under `audits/`:
+Duplicates and typos appear in **red** on the **All** tab (after normal awards) and again under the **Duplicates** tab.
+
+Database-wide read-only scan (does not write to the sheet). Saves a clean report under `audits/` — also available from Actions → Audit:
 
 ```bash
 python3 main.py --audit
@@ -77,6 +74,7 @@ python3 main.py SomeUsername --add "Combat Action Badge" --suffix "x2"
 
 - Lookups use the public CSV export (no credentials required).
 - Add/edit/delete use the Sheets API and require OAuth or a service account.
+- Delete clears the award cell and **shifts that column up** so no blank hole is left (other award columns are unchanged).
 - Award cells are written like `Username`, `Username x2`, or `Username - detail`.
 - Sheet row numbers in the TUI include CSV→live offsets so they match Google Sheets: Badges **+6**, Ribbons **+8**, Foreign Awards **+7** (public CSV export lags the live sheet).
 - **Do not commit** `credentials.json`, `token.json`, or `service_account.json`.

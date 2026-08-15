@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-"""Interactive TUI for looking up and editing awards in the Decorations Database."""
+"""Interactive Textual TUI for looking up and editing awards in the Decorations Database."""
 
 from __future__ import annotations
 
-import curses
-import locale
 import os
 import sys
-import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,6 +12,7 @@ from pathlib import Path
 def _reexec_venv_if_needed() -> None:
     try:
         import googleapiclient  # noqa: F401
+        import textual  # noqa: F401
         return
     except ImportError:
         pass
@@ -30,565 +27,591 @@ def _reexec_venv_if_needed() -> None:
 if __name__ == "__main__":
     _reexec_venv_if_needed()
 
+from textual import on, work
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
+from textual.widgets import (
+    Button,
+    Footer,
+    Header,
+    Input,
+    Label,
+    OptionList,
+    Static,
+    TabbedContent,
+    TabPane,
+)
+from textual.widgets.option_list import Option
+from rich.text import Text
+
 from awards import (
     CATEGORY_LABELS,
+    ROOT,
     Award,
     AwardDef,
     AwardsData,
     awards_excluding_duplicate_rows,
     build_awards_data,
     col_to_index,
-    drop_award_location,
+    collect_sheet_audit,
     find_duplicates_for_user,
     flatten_awards_sorted,
+    format_audit_report,
     get_awards_for_username,
     normalize_username,
+    reindex_column_after_delete,
     row_offset,
+    shift_column_up_in_rows,
     upsert_award_in_index,
 )
 from sheets_auth import auth_status
 from sheets_edit import add_award_to_user, remove_award, update_award_cell
 
 
-class AwardsTUI:
-    def __init__(self, stdscr: curses.window) -> None:
-        self.stdscr = stdscr
-        self.query = ""
-        self.status = "Loading awards from Google Sheets…"
-        self.error: str | None = None
+# ---------------------------------------------------------------------------
+# Modals
+# ---------------------------------------------------------------------------
+
+
+class AddAwardScreen(ModalScreen[tuple[AwardDef, str] | None]):
+    """Pick an award (optional filter) and optional cell suffix."""
+
+    CSS = """
+    AddAwardScreen {
+        align: center middle;
+    }
+    #add-dialog {
+        width: 72;
+        height: 28;
+        border: thick $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    #add-dialog Label {
+        margin-bottom: 1;
+    }
+    #add-candidates {
+        height: 1fr;
+        border: solid $primary-darken-2;
+        margin: 1 0;
+    }
+    #add-actions {
+        height: auto;
+        align: right middle;
+    }
+    #add-actions Button {
+        margin-left: 1;
+    }
+    """
+
+    def __init__(self, candidates: list[AwardDef]) -> None:
+        super().__init__()
+        self._all = candidates
+        self._filtered = list(candidates)
+        self._step = "pick"
+        self._chosen: AwardDef | None = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="add-dialog"):
+            yield Label("Add award", id="add-title")
+            yield Input(placeholder="Filter awards…", id="add-filter")
+            yield OptionList(id="add-candidates")
+            yield Input(placeholder="Suffix optional (x2, Master, …)", id="add-suffix")
+            with Horizontal(id="add-actions"):
+                yield Button("Cancel", id="add-cancel")
+                yield Button("Add", variant="primary", id="add-confirm")
+
+    def on_mount(self) -> None:
+        self.query_one("#add-suffix", Input).display = False
+        self._reload_candidates()
+        self.query_one("#add-filter", Input).focus()
+
+    def _reload_candidates(self) -> None:
+        filt = self.query_one("#add-filter", Input).value.strip().casefold()
+        self._filtered = [
+            d for d in self._all if not filt or filt in d.base_name.casefold()
+        ]
+        opts = self.query_one("#add-candidates", OptionList)
+        opts.clear_options()
+        for i, d in enumerate(self._filtered):
+            cat = CATEGORY_LABELS.get(d.category, d.category)
+            opts.add_option(Option(f"[{cat}] {d.base_name}", id=f"cand-{i}"))
+
+    @on(Input.Changed, "#add-filter")
+    def on_filter_changed(self) -> None:
+        if self._step == "pick":
+            self._reload_candidates()
+
+    @on(OptionList.OptionSelected, "#add-candidates")
+    def on_candidate_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_id and event.option_id.startswith("cand-"):
+            idx = int(event.option_id.split("-", 1)[1])
+            if 0 <= idx < len(self._filtered):
+                self._chosen = self._filtered[idx]
+                self._step = "suffix"
+                self.query_one("#add-title", Label).update(
+                    f"Suffix for {self._chosen.base_name} (optional)"
+                )
+                self.query_one("#add-filter", Input).display = False
+                self.query_one("#add-candidates", OptionList).display = False
+                suffix = self.query_one("#add-suffix", Input)
+                suffix.display = True
+                suffix.focus()
+
+    @on(Button.Pressed, "#add-cancel")
+    def on_cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#add-confirm")
+    def on_confirm(self) -> None:
+        if self._step == "pick":
+            opts = self.query_one("#add-candidates", OptionList)
+            if opts.highlighted is None or not self._filtered:
+                self.app.notify("Select an award first", severity="warning")
+                return
+            highlighted = opts.highlighted
+            if isinstance(highlighted, int) and 0 <= highlighted < len(self._filtered):
+                self._chosen = self._filtered[highlighted]
+            elif self._filtered:
+                self._chosen = self._filtered[0]
+            else:
+                return
+            self._step = "suffix"
+            self.query_one("#add-title", Label).update(
+                f"Suffix for {self._chosen.base_name} (optional)"
+            )
+            self.query_one("#add-filter", Input).display = False
+            self.query_one("#add-candidates", OptionList).display = False
+            suffix = self.query_one("#add-suffix", Input)
+            suffix.display = True
+            suffix.focus()
+            return
+        if not self._chosen:
+            self.dismiss(None)
+            return
+        suffix = self.query_one("#add-suffix", Input).value.strip()
+        self.dismiss((self._chosen, suffix))
+
+    def on_key(self, event) -> None:  # noqa: ANN001
+        if event.key == "escape":
+            self.dismiss(None)
+            event.stop()
+
+
+class EditAwardScreen(ModalScreen[str | None]):
+    """Edit the raw sheet cell value."""
+
+    CSS = """
+    EditAwardScreen {
+        align: center middle;
+    }
+    #edit-dialog {
+        width: 70;
+        height: auto;
+        border: thick $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    #edit-dialog Input {
+        margin: 1 0;
+    }
+    #edit-actions {
+        height: auto;
+        align: right middle;
+    }
+    #edit-actions Button {
+        margin-left: 1;
+    }
+    """
+
+    def __init__(self, award: Award) -> None:
+        super().__init__()
+        self.award = award
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="edit-dialog"):
+            yield Label(f"Edit · {self.award.name}")
+            yield Label(
+                f"{self.award.sheet} · {self.award.col}{self.award.row}",
+                classes="muted",
+            )
+            yield Input(
+                value=self.award.cell or self.award.name,
+                id="edit-cell",
+            )
+            yield Label('Format: Username   or   Username x2   or   Username - detail')
+            with Horizontal(id="edit-actions"):
+                yield Button("Cancel", id="edit-cancel")
+                yield Button("Save", variant="primary", id="edit-save")
+
+    def on_mount(self) -> None:
+        self.query_one("#edit-cell", Input).focus()
+
+    @on(Button.Pressed, "#edit-cancel")
+    def on_cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#edit-save")
+    def on_save(self) -> None:
+        self.dismiss(self.query_one("#edit-cell", Input).value)
+
+    @on(Input.Submitted, "#edit-cell")
+    def on_submit(self) -> None:
+        self.dismiss(self.query_one("#edit-cell", Input).value)
+
+    def on_key(self, event) -> None:  # noqa: ANN001
+        if event.key == "escape":
+            self.dismiss(None)
+            event.stop()
+
+
+class DeleteAwardScreen(ModalScreen[bool]):
+    """Confirm delete by typing delete."""
+
+    CSS = """
+    DeleteAwardScreen {
+        align: center middle;
+    }
+    #delete-dialog {
+        width: 64;
+        height: auto;
+        border: thick $error;
+        background: $surface;
+        padding: 1 2;
+    }
+    #delete-dialog Input {
+        margin: 1 0;
+    }
+    #delete-actions {
+        height: auto;
+        align: right middle;
+    }
+    #delete-actions Button {
+        margin-left: 1;
+    }
+    """
+
+    def __init__(self, award: Award, username: str) -> None:
+        super().__init__()
+        self.award = award
+        self.username = username
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="delete-dialog"):
+            yield Label(
+                f"Remove {self.award.name} (row {self.award.row}) from @{self.username}?"
+            )
+            yield Label('Type "delete" to confirm')
+            yield Input(placeholder="delete", id="delete-confirm")
+            with Horizontal(id="delete-actions"):
+                yield Button("Cancel", id="delete-cancel")
+                yield Button("Delete", variant="error", id="delete-ok")
+
+    def on_mount(self) -> None:
+        self.query_one("#delete-confirm", Input).focus()
+
+    @on(Button.Pressed, "#delete-cancel")
+    def on_cancel(self) -> None:
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#delete-ok")
+    def on_ok(self) -> None:
+        if self.query_one("#delete-confirm", Input).value.strip().lower() == "delete":
+            self.dismiss(True)
+        else:
+            self.app.notify('Type "delete" to confirm', severity="warning")
+
+    @on(Input.Submitted, "#delete-confirm")
+    def on_submit(self) -> None:
+        if self.query_one("#delete-confirm", Input).value.strip().lower() == "delete":
+            self.dismiss(True)
+        else:
+            self.app.notify('Type "delete" to confirm', severity="warning")
+
+    def on_key(self, event) -> None:  # noqa: ANN001
+        if event.key == "escape":
+            self.dismiss(False)
+            event.stop()
+
+
+# ---------------------------------------------------------------------------
+# Main app
+# ---------------------------------------------------------------------------
+
+
+class AwardsApp(App[None]):
+    """Posting-inspired purple awards editor."""
+
+    TITLE = "awards-tui"
+    SUB_TITLE = "Decorations Database"
+
+    CSS = """
+    Screen {
+        background: #0c0c0f;
+    }
+
+    Header {
+        background: #12121a;
+        color: #e8e4f5;
+        text-style: bold;
+    }
+
+    Footer {
+        background: #12121a;
+    }
+
+    #top-bar {
+        height: 3;
+        background: #12121a;
+        padding: 0 1;
+        align: left middle;
+    }
+
+    #user-chip {
+        width: 8;
+        background: #7c3aed;
+        color: #ffffff;
+        text-style: bold;
+        content-align: center middle;
+        margin-right: 1;
+    }
+
+    #username {
+        width: 1fr;
+        background: #1e1b4b;
+        border: tall #4c1d95;
+        color: #f5f3ff;
+    }
+
+    #username:focus {
+        border: tall #a78bfa;
+    }
+
+    #lookup-btn {
+        margin-left: 1;
+        background: #7c3aed;
+        color: #ffffff;
+        text-style: bold;
+        border: none;
+        min-width: 12;
+    }
+
+    #lookup-btn:hover {
+        background: #8b5cf6;
+    }
+
+    #body {
+        height: 1fr;
+        padding: 0 1 0 1;
+    }
+
+    #actions-panel, #awards-panel, #detail-panel {
+        border: solid #3b3358;
+        background: #101018;
+        height: 1fr;
+        padding: 0 1;
+    }
+
+    #actions-panel {
+        width: 18;
+        margin-right: 1;
+    }
+
+    #awards-panel {
+        width: 1fr;
+        margin-right: 1;
+    }
+
+    #detail-panel {
+        width: 36;
+    }
+
+    .panel-title {
+        color: #a78bfa;
+        text-style: bold;
+        padding: 0 1;
+        dock: top;
+        height: 1;
+        background: #101018;
+    }
+
+    #actions-list {
+        height: 1fr;
+        border: none;
+        background: transparent;
+    }
+
+    #actions-list > .option-list--option-highlighted {
+        background: #4c1d95;
+        color: #f5f3ff;
+    }
+
+    TabbedContent {
+        height: auto;
+    }
+
+    Tabs {
+        background: #101018;
+        dock: top;
+    }
+
+    Tab {
+        color: #9ca3af;
+    }
+
+    Tab.-active {
+        color: #a78bfa;
+        text-style: bold;
+    }
+
+    Underline > .underline--bar {
+        background: #7c3aed;
+        color: #7c3aed;
+    }
+
+    #awards-list {
+        height: 1fr;
+        border: none;
+        background: transparent;
+    }
+
+    #awards-list > .option-list--option-highlighted {
+        background: #312e81;
+        color: #f5f3ff;
+        text-style: bold;
+    }
+
+    #detail-body {
+        height: 1fr;
+        padding: 1 0;
+    }
+
+    #detail-body Label {
+        color: #c4b5fd;
+        margin-bottom: 0;
+    }
+
+    #detail-value {
+        color: #f5f3ff;
+        margin-bottom: 1;
+        text-style: bold;
+    }
+
+    #detail-actions {
+        height: auto;
+        dock: bottom;
+        padding: 1 0;
+    }
+
+    #detail-actions Button {
+        margin-right: 1;
+        min-width: 10;
+    }
+
+    #status-line {
+        height: 1;
+        background: #12121a;
+        color: #a78bfa;
+        padding: 0 1;
+    }
+
+    .muted {
+        color: #9ca3af;
+    }
+    """
+
+    BINDINGS = [
+        Binding("ctrl+q", "quit", "Quit", show=True),
+        Binding("a", "add", "Add", show=True),
+        Binding("e", "edit", "Edit", show=True),
+        Binding("d", "delete", "Delete", show=True),
+        Binding("f5,ctrl+r", "refresh", "Refresh", show=True),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
         self.data: AwardsData | None = None
         self.synced_at: str | None = None
-        self.scroll = 0
         self.results_username: str | None = None
         self.results: list[Award] = []
         self.duplicates: list[Award] = []
-        self.selected = 0
-        self.focus = "search"  # search | list
-        self.mode = "main"  # main | add | edit | confirm_delete
-        self.modal_input = ""
-        self.modal_filter = ""
-        self.cursor = 0
-        self.add_candidates: list[AwardDef] = []
-        self.add_selected = 0
-        self.add_step = "pick"  # pick | suffix
-        self.pending_award_def: AwardDef | None = None
-        self.pending_award: Award | None = None
-        self._load_lock = threading.Lock()
-        self._loading = False
+        self._visible: list[Award] = []
+        self._visible_warn: list[bool] = []
         self._busy = False
+        self._loading = False
+        self._active_tab = "all"
 
-    def all_entries(self) -> list[Award]:
-        return self.results + self.duplicates
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False)
+        with Horizontal(id="top-bar"):
+            yield Label("USER", id="user-chip")
+            yield Input(placeholder="Enter a username…", id="username")
+            yield Button("Lookup", id="lookup-btn")
+        with Horizontal(id="body"):
+            with Vertical(id="actions-panel"):
+                yield Label(" Actions ", classes="panel-title")
+                yield OptionList(
+                    Option("Lookup", id="act-lookup"),
+                    Option("Add", id="act-add"),
+                    Option("Edit", id="act-edit"),
+                    Option("Delete", id="act-delete"),
+                    Option("Refresh", id="act-refresh"),
+                    Option("Audit", id="act-audit"),
+                    id="actions-list",
+                )
+            with Vertical(id="awards-panel"):
+                yield Label(" Awards ", classes="panel-title")
+                with TabbedContent(id="award-tabs", initial="all"):
+                    yield TabPane("All", id="all")
+                    yield TabPane("Badges", id="badges")
+                    yield TabPane("Ribbons", id="ribbons")
+                    yield TabPane("Foreign", id="foreign")
+                    yield TabPane("Duplicates/Typos", id="duplicates")
+                yield OptionList(id="awards-list")
+            with Vertical(id="detail-panel"):
+                yield Label(" Detail ", classes="panel-title")
+                with VerticalScroll(id="detail-body"):
+                    yield Label("Name")
+                    yield Static("—", id="d-name", classes="detail-value")
+                    yield Label("Sheet")
+                    yield Static("—", id="d-sheet", classes="detail-value")
+                    yield Label("Column / Row")
+                    yield Static("—", id="d-loc", classes="detail-value")
+                    yield Label("Cell")
+                    yield Static("—", id="d-cell", classes="detail-value")
+                with Horizontal(id="detail-actions"):
+                    yield Button("Edit", id="detail-edit", variant="primary")
+                    yield Button("Delete", id="detail-delete", variant="error")
+        yield Static("Loading awards from Google Sheets…", id="status-line")
+        yield Footer()
 
-    def _selected_entry(self) -> Award | None:
-        entries = self.all_entries()
-        if 0 <= self.selected < len(entries):
-            return entries[self.selected]
-        return self.pending_award
+    def on_mount(self) -> None:
+        self.query_one("#username", Input).focus()
+        self._loading = True
+        self.refresh_data()
 
-    def _clamp_selected(self) -> None:
-        n = len(self.all_entries())
-        self.selected = min(self.selected, max(0, n - 1)) if n else 0
+    # --- status / busy -------------------------------------------------
+
+    def _set_status(self, text: str) -> None:
+        self.query_one("#status-line", Static).update(text)
 
     def _begin_busy(self, status: str) -> bool:
-        """Claim the write lock on the main thread before starting a worker."""
+        """Claim the write lock on the UI thread before starting a worker."""
         if self._busy or self._loading:
-            self.status = "Wait for the current sheet operation to finish"
+            self.notify("Wait for the current sheet operation to finish", severity="warning")
             return False
         self._busy = True
-        self.status = status
-        self.error = None
+        self._set_status(status)
         return True
 
-    def _clamp_cursor(self, text: str) -> None:
-        self.cursor = max(0, min(self.cursor, len(text)))
+    def _end_busy(self) -> None:
+        self._busy = False
 
-    def _apply_text_key(self, key: int, text: str) -> tuple[str, bool]:
-        """Insert/delete/move in `text` at `self.cursor`. Returns (text, handled)."""
-        self._clamp_cursor(text)
-        if key == curses.KEY_LEFT:
-            self.cursor = max(0, self.cursor - 1)
-            return text, True
-        if key == curses.KEY_RIGHT:
-            self.cursor = min(len(text), self.cursor + 1)
-            return text, True
-        if key in (curses.KEY_HOME, 1):  # Home / Ctrl+A
-            self.cursor = 0
-            return text, True
-        if key in (curses.KEY_END, 5):  # End / Ctrl+E
-            self.cursor = len(text)
-            return text, True
-        if key == curses.KEY_BACKSPACE or key in (127, 8):
-            if self.cursor > 0:
-                text = text[: self.cursor - 1] + text[self.cursor :]
-                self.cursor -= 1
-            return text, True
-        if key == curses.KEY_DC:
-            if self.cursor < len(text):
-                text = text[: self.cursor] + text[self.cursor + 1 :]
-            return text, True
-        if 32 <= key <= 126:
-            text = text[: self.cursor] + chr(key) + text[self.cursor :]
-            self.cursor += 1
-            return text, True
-        return text, False
-
-    def _place_cursor(self, y: int, x: int, text: str, field_x: int, max_x: int) -> None:
-        self._clamp_cursor(text)
-        curs_x = field_x + self.cursor
-        if y >= 0 and field_x <= curs_x < max_x:
-            try:
-                self.stdscr.move(y, curs_x)
-            except curses.error:
-                pass
-
-    def start(self) -> None:
-        for loc in ("en_US.UTF-8", "C.UTF-8", ""):
-            try:
-                locale.setlocale(locale.LC_ALL, loc)
-                break
-            except locale.Error:
-                continue
-        curses.curs_set(1)
-        curses.use_default_colors()
-        if curses.has_colors():
-            curses.init_pair(1, curses.COLOR_CYAN, -1)
-            curses.init_pair(2, curses.COLOR_GREEN, -1)
-            curses.init_pair(3, curses.COLOR_YELLOW, -1)
-            curses.init_pair(4, curses.COLOR_RED, -1)
-            curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLUE)
-            curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_CYAN)
-            curses.init_pair(7, curses.COLOR_MAGENTA, -1)
-        self.stdscr.nodelay(True)
-        self.stdscr.keypad(True)
-        self.refresh_data(async_=True)
-
-        while True:
-            self.draw()
-            try:
-                key = self.stdscr.getch()
-            except curses.error:
-                key = -1
-
-            if key == -1:
-                time.sleep(0.03)
-                continue
-
-            if self.mode == "add":
-                if self._handle_add(key):
-                    break
-                continue
-            if self.mode == "edit":
-                if self._handle_edit(key):
-                    break
-                continue
-            if self.mode == "confirm_delete":
-                if self._handle_confirm_delete(key):
-                    break
-                continue
-            if self._handle_main(key):
-                break
-
-    def _handle_main(self, key: int) -> bool:
-        """Return True to quit."""
-        if key == 9:  # Tab
-            if self.results or self.duplicates:
-                self.focus = "list" if self.focus == "search" else "search"
-            return False
-
-        if self.focus == "list" and self.results_username:
-            entries = self.all_entries()
-            if key == curses.KEY_UP and entries:
-                self.selected = max(0, self.selected - 1)
-                self._ensure_selected_visible()
-                return False
-            if key == curses.KEY_DOWN and entries:
-                self.selected = min(len(entries) - 1, self.selected + 1)
-                self._ensure_selected_visible()
-                return False
-            if key in (ord("a"), ord("A")):
-                self._open_add()
-                return False
-            if key in (ord("e"), ord("E")):
-                if self.all_entries():
-                    self._open_edit()
-                return False
-            if key in (ord("d"), ord("D")):
-                if self._busy:
-                    self.status = "Wait for the current sheet operation to finish"
-                    return False
-                if self.all_entries():
-                    award = self._selected_entry()
-                    if not award:
-                        return False
-                    self.pending_award = award
-                    self.modal_input = ""
-                    self.cursor = 0
-                    self.mode = "confirm_delete"
-                return False
-            if key == ord("/"):
-                self.focus = "search"
-                return False
-
-        if key in (ord("q"),) and self.focus == "search" and not self.query:
-            return True
-        if key == 27:
-            if self.query:
-                self.query = ""
-                self.cursor = 0
-                self.results = []
-                self.duplicates = []
-                self.results_username = None
-                self.scroll = 0
-                self.selected = 0
-                self.focus = "search"
-            else:
-                return True
-        elif key in (curses.KEY_ENTER, 10, 13):
-            if self.focus == "search":
-                self.lookup()
-            return False
-        elif key == curses.KEY_BACKSPACE or key in (127, 8, curses.KEY_DC, curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_HOME, curses.KEY_END) or key in (1, 5):
-            if self.focus == "search":
-                self.query, _ = self._apply_text_key(key, self.query)
-            return False
-        elif key == curses.KEY_UP and self.focus == "search":
-            self.scroll = max(0, self.scroll - 1)
-            return False
-        elif key == curses.KEY_DOWN and self.focus == "search":
-            self.scroll += 1
-            return False
-        elif key == curses.KEY_PPAGE:
-            self.scroll = max(0, self.scroll - 10)
-            return False
-        elif key == curses.KEY_NPAGE:
-            self.scroll += 10
-            return False
-        elif key == curses.KEY_F5 or key == 18:
-            if self._busy:
-                self.status = "Wait for the current sheet operation to finish"
-                return False
-            self.refresh_data(async_=True)
-            return False
-        elif 32 <= key <= 126:
-            if self.focus == "list":
-                # Letters that aren't commands fall through to search.
-                ch = chr(key)
-                if ch.lower() in ("a", "e", "d"):
-                    return False
-                self.focus = "search"
-                self.cursor = len(self.query)
-                self.query, _ = self._apply_text_key(key, self.query)
-            else:
-                self.query, _ = self._apply_text_key(key, self.query)
-        return False
-
-    def _open_add(self) -> None:
-        if self._busy:
-            self.status = "Wait for the current sheet operation to finish"
-            return
-        if not self.results_username:
-            self.status = "Look up a user before adding awards"
-            return
-        if not self.data:
-            self.status = "Still loading…"
-            return
-        owned = {(a.sheet, a.col) for a in self.all_entries()}
-        self.add_candidates = [d for d in self.data.catalog if (d.sheet, d.col) not in owned]
-        self.add_selected = 0
-        self.modal_filter = ""
-        self.add_step = "pick"
-        self.pending_award_def = None
-        self.modal_input = ""
-        self.cursor = 0
-        self.mode = "add"
-        self.error = None
-        self.status = f"Add award for @{self.results_username}"
-
-    def _filtered_add_candidates(self) -> list[AwardDef]:
-        q = self.modal_filter.strip().casefold()
-        if not q:
-            return self.add_candidates
-        return [
-            d
-            for d in self.add_candidates
-            if q in d.base_name.casefold() or q in d.category or q in CATEGORY_LABELS.get(d.category, "").casefold()
-        ]
-
-    def _handle_add(self, key: int) -> bool:
-        if self.add_step == "suffix":
-            if key == 27:
-                self.add_step = "pick"
-                self.modal_input = ""
-                self.cursor = 0
-                return False
-            if key in (curses.KEY_ENTER, 10, 13):
-                self._commit_add(self.modal_input)
-                return False
-            self.modal_input, handled = self._apply_text_key(key, self.modal_input)
-            return False
-
-        # pick step
-        filtered = self._filtered_add_candidates()
-        if key == 27:
-            self.mode = "main"
-            self.status = f"{self.results_username} · {len(self.results)} award(s)" if self.results_username else self.status
-            return False
-        if key == curses.KEY_UP:
-            self.add_selected = max(0, self.add_selected - 1)
-            return False
-        if key == curses.KEY_DOWN:
-            self.add_selected = min(max(0, len(filtered) - 1), self.add_selected + 1)
-            return False
-        if key in (curses.KEY_ENTER, 10, 13):
-            if not filtered:
-                self.status = "No matching awards"
-                return False
-            self.pending_award_def = filtered[self.add_selected]
-            self.add_step = "suffix"
-            self.modal_input = ""
-            self.cursor = 0
-            self.status = "Optional suffix (e.g. x2 or Master) — Enter to save blank"
-            return False
-        self.modal_filter, handled = self._apply_text_key(key, self.modal_filter)
-        if handled and key not in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_HOME, curses.KEY_END, 1, 5):
-            self.add_selected = 0
-        return False
-
-    def _commit_add(self, suffix: str) -> None:
-        if not self.pending_award_def or not self.results_username or not self.data:
-            self.mode = "main"
-            return
-        if not self._begin_busy(f"Writing {self.pending_award_def.base_name}…"):
-            return
-        award_def = self.pending_award_def
-        username = self.results_username
-        rows = self.data.sheet_rows.get(award_def.sheet)
-
-        def worker() -> None:
-            try:
-                result = add_award_to_user(
-                    username=username,
-                    award_def=award_def,
-                    suffix=suffix,
-                    rows=rows,
-                    interactive_auth=False,
-                )
-                if result.ok and result.award:
-                    if self.data:
-                        upsert_award_in_index(self.data.index, result.award)
-                        self._patch_sheet_cell(
-                            result.award.sheet,
-                            result.award.col,
-                            result.award.row,
-                            result.award.cell,
-                        )
-                    self._sync_user_view(select_award=result.award)
-                    self.status = result.message
-                    self.mode = "main"
-                    self.focus = "list"
-                else:
-                    self.error = result.message
-                    self.status = "Add failed"
-                    self.mode = "main"
-            finally:
-                self._busy = False
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _open_edit(self) -> None:
-        if self._busy:
-            self.status = "Wait for the current sheet operation to finish"
-            return
-        award = self._selected_entry()
-        if not award:
-            return
-        self.pending_award = award
-        self.modal_input = award.cell or award.name
-        self.cursor = len(self.modal_input)
-        self.mode = "edit"
-        self.status = f"Edit row {award.row} (must start with username)"
-
-    def _handle_edit(self, key: int) -> bool:
-        if key == 27:
-            self.mode = "main"
-            self.pending_award = None
-            self.status = f"{self.results_username} · {len(self.results)} award(s)"
-            return False
-        if key in (curses.KEY_ENTER, 10, 13):
-            self._commit_edit()
-            return False
-        self.modal_input, _ = self._apply_text_key(key, self.modal_input)
-        return False
-
-    def _commit_edit(self) -> None:
-        award = self.pending_award or self._selected_entry()
-        if not award:
-            return
-        if not self._begin_busy("Updating sheet…"):
-            return
-        new_cell = self.modal_input
-
-        def worker() -> None:
-            try:
-                result = update_award_cell(award, new_cell, interactive_auth=False)
-                self.mode = "main"
-                self.pending_award = None
-                if result.ok and result.award:
-                    if self.data:
-                        upsert_award_in_index(self.data.index, result.award)
-                        self._patch_sheet_cell(
-                            result.award.sheet,
-                            result.award.col,
-                            result.award.row,
-                            result.award.cell,
-                        )
-                    new_key = normalize_username(result.award.cell)
-                    viewed = (self.results_username or "").lower()
-                    if new_key and viewed and new_key != viewed:
-                        self._sync_user_view(preserve_selection=True)
-                        self.status = f"{result.message} · no longer under @{viewed}"
-                    else:
-                        self._sync_user_view(select_award=result.award)
-                        self.status = result.message
-                else:
-                    self.error = result.message
-                    self.status = "Edit failed"
-            finally:
-                self._busy = False
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _handle_confirm_delete(self, key: int) -> bool:
-        if key == 27:
-            self.modal_input = ""
-            self.pending_award = None
-            self.mode = "main"
-            self.status = f"{self.results_username} · {len(self.results)} award(s)"
-            return False
-        if key in (curses.KEY_ENTER, 10, 13):
-            if self.modal_input.strip().lower() == "delete":
-                self.modal_input = ""
-                self.cursor = 0
-                self._commit_delete()
-            else:
-                self.status = 'Type "delete" and press Enter to confirm'
-            return False
-        self.modal_input, _ = self._apply_text_key(key, self.modal_input)
-        return False
-
-    def _commit_delete(self) -> None:
-        award = self.pending_award or self._selected_entry()
-        if not award:
-            return
-        if not self._begin_busy(f"Removing {award.name}…"):
-            return
-
-        def worker() -> None:
-            try:
-                result = remove_award(award, interactive_auth=False)
-                # Leave confirm screen before list mutation so draw cannot race.
-                self.mode = "main"
-                self.pending_award = None
-                if result.ok:
-                    if self.data:
-                        drop_award_location(
-                            self.data.index, award.sheet, award.col, award.row
-                        )
-                        self._patch_sheet_cell(award.sheet, award.col, award.row, "")
-                    self._sync_user_view(preserve_selection=True)
-                    self.status = result.message
-                else:
-                    self.error = result.message
-                    self.status = "Delete failed"
-            finally:
-                self._busy = False
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def refresh_data(self, async_: bool = True) -> None:
-        if self.mode != "main":
-            self.status = "Finish the current dialog before refreshing"
-            return
-        with self._load_lock:
-            if self._loading or self._busy:
-                return
-            self._loading = True
-            self.status = "Syncing Badges / Ribbons / Foreign Awards…"
-            self.error = None
-
-        def worker() -> None:
-            try:
-                data = build_awards_data()
-                self.data = data
-                self.synced_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-                auth = auth_status()
-                auth_note = {
-                    "service_account": "write: service account",
-                    "oauth_token": "write: logged in",
-                    "oauth_needs_login": "write: run --login",
-                    "missing": "write: no credentials",
-                }.get(auth, auth)
-                self.status = f"Ready · {len(data.index)} users · {auth_note}"
-                if self.results_username:
-                    self.lookup(
-                        silent=True,
-                        preserve_view=True,
-                        username=self.results_username,
-                    )
-            except Exception as exc:  # noqa: BLE001
-                self.error = str(exc)
-                self.status = "Sync failed"
-            finally:
-                with self._load_lock:
-                    self._loading = False
-
-        if async_:
-            threading.Thread(target=worker, daemon=True).start()
-        else:
-            worker()
-
-    def lookup(
-        self,
-        silent: bool = False,
-        preserve_view: bool = False,
-        username: str | None = None,
-    ) -> None:
-        if username is None:
-            username = normalize_username(self.query) or self.query.strip().lstrip("@")
-        else:
-            username = normalize_username(username) or username.strip().lstrip("@")
-        if not username:
-            if not silent:
-                self.status = "Enter a username"
-            return
-        if self.data is None:
-            self.status = "Still loading awards…"
-            return
-        prev_scroll = self.scroll
-        prev_focus = self.focus
-        awards = flatten_awards_sorted(get_awards_for_username(self.data.index, username))
-        dup_hits = find_duplicates_for_user(self.data, username)
-        awards = awards_excluding_duplicate_rows(awards, dup_hits)
-        self.results_username = username
-        self.results = awards
-        self.duplicates = [h.to_award() for h in dup_hits]
-        if preserve_view:
-            self._clamp_selected()
-            self.scroll = prev_scroll
-            self.focus = prev_focus
-        else:
-            self.scroll = 0
-            self.selected = 0
-            self.focus = "list"
-        dup_note = f" · {len(self.duplicates)} duplicate(s)" if self.duplicates else ""
-        if awards or self.duplicates:
-            self.status = f"{username} · {len(awards)} award(s){dup_note} · Tab list/search · a/e/d"
-        else:
-            self.status = f"No awards for {username} · press a to add"
+    # --- data helpers --------------------------------------------------
 
     def _patch_sheet_cell(self, sheet: str, col: str, row: int, value: str) -> None:
-        """Keep cached sheet rows aligned with local edits between refreshes."""
         if not self.data:
             return
         rows = self.data.sheet_rows.setdefault(sheet, [])
@@ -602,259 +625,412 @@ class AwardsTUI:
             rows[csv_index].append("")
         rows[csv_index][col_idx] = value
 
-    def _sync_user_view(
-        self,
-        *,
-        preserve_selection: bool = True,
-        select_award: Award | None = None,
-    ) -> None:
-        """Refresh results and duplicate sections for the current user."""
-        if not self.results_username or not self.data:
-            return
-        prev_selected = self.selected
-        prev_scroll = self.scroll
-        username = self.results_username
-        awards = flatten_awards_sorted(
-            get_awards_for_username(self.data.index, username),
-        )
-        dup_hits = find_duplicates_for_user(self.data, username)
-        awards = awards_excluding_duplicate_rows(awards, dup_hits)
-        self.results = awards
-        self.duplicates = [h.to_award() for h in dup_hits]
-        if select_award:
-            entries = self.all_entries()
-            self.selected = next(
-                (
-                    i
-                    for i, a in enumerate(entries)
-                    if a.sheet == select_award.sheet
-                    and a.col == select_award.col
-                    and a.row == select_award.row
-                ),
-                min(prev_selected, max(0, len(entries) - 1)),
-            )
-        elif preserve_selection:
-            self._clamp_selected()
-            self.scroll = prev_scroll
-        self._ensure_selected_visible()
+    def _visible_for_tab(self) -> list[tuple[Award, bool]]:
+        """Return (award, is_duplicate_or_typo) rows for the active tab."""
+        tab = self._active_tab
+        if tab == "duplicates":
+            return [(a, True) for a in self.duplicates]
+        if tab == "all":
+            # Primary awards, then duplicate/typo rows (shown in red).
+            return [(a, False) for a in self.results] + [
+                (a, True) for a in self.duplicates
+            ]
+        return [(a, False) for a in self.results if a.category == tab]
 
-    def _selected_line_index(self) -> int | None:
-        """Map the selected award index to its line in `_result_lines`."""
-        if not self.results and not self.duplicates:
+    def _refresh_awards_list(self, *, select: Award | None = None) -> None:
+        rows = self._visible_for_tab()
+        self._visible = [a for a, _ in rows]
+        self._visible_warn = [warn for _, warn in rows]
+        opts = self.query_one("#awards-list", OptionList)
+        opts.clear_options()
+        highlight = 0
+        for i, (award, warn) in enumerate(rows):
+            loc = f"  · row {award.row}" if award.row else ""
+            label = f"{award.name}{loc}"
+            if warn:
+                prompt: str | Text = Text(label, style="bold #f87171")
+            else:
+                prompt = label
+            opts.add_option(Option(prompt, id=f"aw-{i}"))
+            if (
+                select
+                and award.sheet == select.sheet
+                and award.col == select.col
+                and award.row == select.row
+            ):
+                highlight = i
+        if self._visible:
+            opts.highlighted = min(highlight, len(self._visible) - 1)
+            self._show_detail(self._visible[opts.highlighted or 0])
+        else:
+            self._show_detail(None)
+
+    def _show_detail(self, award: Award | None) -> None:
+        if not award:
+            self.query_one("#d-name", Static).update("—")
+            self.query_one("#d-sheet", Static).update("—")
+            self.query_one("#d-loc", Static).update("—")
+            self.query_one("#d-cell", Static).update("—")
+            return
+        self.query_one("#d-name", Static).update(award.name)
+        self.query_one("#d-sheet", Static).update(award.sheet or "—")
+        loc = f"{award.col}{award.row}" if award.col and award.row else "—"
+        self.query_one("#d-loc", Static).update(loc)
+        self.query_one("#d-cell", Static).update(award.cell or "—")
+
+    def _selected_award(self) -> Award | None:
+        opts = self.query_one("#awards-list", OptionList)
+        idx = opts.highlighted
+        if idx is None or not self._visible:
             return None
-        line = 2  # title + blank
-        award_idx = 0
-        current_cat = None
-        for award in self.results:
-            if award.category != current_cat:
-                current_cat = award.category
-                line += 1  # category header
-            if award_idx == self.selected:
-                return line
-            line += 1
-            award_idx += 1
-        if self.duplicates:
-            line += 1  # duplicates section header
-            for _award in self.duplicates:
-                if award_idx == self.selected:
-                    return line
-                line += 1
-                award_idx += 1
+        if 0 <= idx < len(self._visible):
+            return self._visible[idx]
         return None
 
-    def _ensure_selected_visible(self) -> None:
-        target = self._selected_line_index()
-        if target is None:
-            target = 2 + self.selected
-        h, _ = self.stdscr.getmaxyx()
-        view_h = max(1, h - 9)
-        if target < self.scroll:
-            self.scroll = target
-        elif target >= self.scroll + view_h:
-            self.scroll = target - view_h + 1
-
-    def draw(self) -> None:
-        self.stdscr.erase()
-        h, w = self.stdscr.getmaxyx()
-        if h < 10 or w < 48:
-            self._addstr(0, 0, "Terminal too small", curses.A_BOLD)
-            self.stdscr.refresh()
+    def _apply_user_view(
+        self,
+        username: str,
+        *,
+        select: Award | None = None,
+        status: str | None = None,
+    ) -> None:
+        if not self.data:
             return
+        awards = flatten_awards_sorted(get_awards_for_username(self.data.index, username))
+        dup_hits = find_duplicates_for_user(self.data, username)
+        awards = awards_excluding_duplicate_rows(awards, dup_hits)
+        self.results_username = username
+        self.results = awards
+        self.duplicates = [h.to_award() for h in dup_hits]
+        self._refresh_awards_list(select=select)
+        dup_note = f" · {len(self.duplicates)} duplicate(s)" if self.duplicates else ""
+        self._set_status(
+            status
+            or f"{username} · {len(awards)} award(s){dup_note} · a/e/d · F5 refresh"
+        )
 
-        if self.mode == "add":
-            self._draw_add(h, w)
-            self.stdscr.refresh()
+    # --- lookup / refresh / audit --------------------------------------
+
+    @on(Button.Pressed, "#lookup-btn")
+    def on_lookup_button(self) -> None:
+        self.action_lookup()
+
+    @on(Input.Submitted, "#username")
+    def on_username_submitted(self) -> None:
+        self.action_lookup()
+
+    def action_lookup(self) -> None:
+        raw = self.query_one("#username", Input).value
+        username = normalize_username(raw) or raw.strip().lstrip("@")
+        if not username:
+            self.notify("Enter a username", severity="warning")
             return
-        if self.mode == "edit":
-            self._draw_edit(h, w)
-            self.stdscr.refresh()
+        if self.data is None:
+            self.notify("Still loading awards…", severity="warning")
             return
-        if self.mode == "confirm_delete":
-            self._draw_confirm_delete(h, w)
-            self.stdscr.refresh()
-            return
+        self._apply_user_view(username)
 
-        title = " Decorations Database · Awards Editor "
-        self._addstr(0, max(0, (w - len(title)) // 2), title, curses.color_pair(5) | curses.A_BOLD)
-
-        sync = f" Synced: {self.synced_at or 'never'} "
-        self._addstr(1, 1, sync[: w - 2], curses.color_pair(1))
-
-        prompt = " Username: "
-        box = f"{prompt}{self.query}"
-        search_attr = curses.A_BOLD | (curses.color_pair(6) if self.focus == "search" else 0)
-        self._addstr(3, 1, "┌" + "─" * (w - 4) + "┐")
-        self._addstr(4, 1, "│" + box[: w - 4].ljust(w - 4) + "│", search_attr)
-        self._addstr(5, 1, "└" + "─" * (w - 4) + "┘")
-
-        help_line = "Enter lookup · Tab focus · a add · e edit · d delete · F5 refresh · q quit"
-        self._addstr(h - 2, 1, help_line[: w - 2], curses.color_pair(3))
-
-        status = self.error or self.status
-        attr = curses.color_pair(4) if self.error else curses.color_pair(2)
-        self._addstr(h - 1, 0, status[:w].ljust(w), attr | curses.A_BOLD)
-
-        lines = self._result_lines()
-        view_top = 7
-        view_h = max(0, h - 9)
-        if self.scroll > max(0, len(lines) - view_h):
-            self.scroll = max(0, len(lines) - view_h)
-        visible = lines[self.scroll : self.scroll + view_h]
-        for i, (text, style) in enumerate(visible):
-            self._addstr(view_top + i, 2, text[: w - 3], style)
-
-        if self.focus == "search":
-            self._place_cursor(4, 2 + len(prompt), self.query, 2 + len(prompt), w - 1)
-
-        self.stdscr.refresh()
-
-    def _draw_add(self, h: int, w: int) -> None:
-        title = f" Add award · @{self.results_username} "
-        self._addstr(0, max(0, (w - len(title)) // 2), title, curses.color_pair(5) | curses.A_BOLD)
-        if self.add_step == "suffix":
-            name = self.pending_award_def.base_name if self.pending_award_def else ""
-            self._addstr(2, 2, f"Award: {name}"[: w - 3], curses.A_BOLD)
-            self._addstr(4, 2, "Suffix (optional):", curses.color_pair(1))
-            self._addstr(5, 2, self.modal_input[: w - 4], curses.A_BOLD)
-            self._addstr(7, 2, "Examples: x2   Master   \"Bronze Oak Leaf\"", curses.A_DIM)
-            self._addstr(h - 2, 1, "←/→ move · Backspace/Del · Enter save · Esc back", curses.color_pair(3))
-        else:
-            self._addstr(2, 2, f"Filter: {self.modal_filter}"[: w - 3], curses.A_BOLD)
-            filtered = self._filtered_add_candidates()
-            if self.add_selected >= len(filtered):
-                self.add_selected = max(0, len(filtered) - 1)
-            view_top = 4
-            view_h = max(1, h - 7)
-            start = max(0, self.add_selected - view_h + 1) if self.add_selected >= view_h else 0
-            for i, d in enumerate(filtered[start : start + view_h]):
-                label = f"[{CATEGORY_LABELS.get(d.category, d.category)}] {d.base_name}"
-                attr = curses.color_pair(6) | curses.A_BOLD if start + i == self.add_selected else curses.A_NORMAL
-                self._addstr(view_top + i, 2, label[: w - 3], attr)
-            self._addstr(h - 2, 1, "Type to filter · ↑/↓ · Enter · Esc cancel", curses.color_pair(3))
-        status = self.error or self.status
-        attr = curses.color_pair(4) if self.error else curses.color_pair(2)
-        self._addstr(h - 1, 0, status[:w].ljust(w), attr | curses.A_BOLD)
-        if self.add_step == "suffix":
-            self._place_cursor(5, 2, self.modal_input, 2, w - 1)
-        else:
-            self._place_cursor(2, 2 + len("Filter: "), self.modal_filter, 2 + len("Filter: "), w - 1)
-
-    def _draw_edit(self, h: int, w: int) -> None:
-        award = self.pending_award or self._selected_entry()
-        title = " Edit award cell "
-        self._addstr(0, max(0, (w - len(title)) // 2), title, curses.color_pair(5) | curses.A_BOLD)
-        if award:
-            self._addstr(2, 2, f"{award.name}"[: w - 3], curses.A_BOLD)
-            self._addstr(3, 2, f"{award.sheet} · row {award.row}"[: w - 3], curses.color_pair(1))
-        self._addstr(5, 2, "Cell value:", curses.A_DIM)
-        self._addstr(6, 2, self.modal_input[: w - 4], curses.A_BOLD)
-        self._addstr(8, 2, 'Format: Username   or   Username x2   or   Username - detail', curses.A_DIM)
-        self._addstr(h - 2, 1, "←/→ move · Home/End · Backspace/Del · Enter save · Esc cancel", curses.color_pair(3))
-        status = self.error or self.status
-        attr = curses.color_pair(4) if self.error else curses.color_pair(2)
-        self._addstr(h - 1, 0, status[:w].ljust(w), attr | curses.A_BOLD)
-        self._place_cursor(6, 2, self.modal_input, 2, w - 1)
-
-    def _draw_confirm_delete(self, h: int, w: int) -> None:
-        award = self.pending_award or self._selected_entry()
-        title = " Confirm delete "
-        self._addstr(0, max(0, (w - len(title)) // 2), title, curses.color_pair(5) | curses.A_BOLD)
-        name = award.name if award else "?"
-        loc = f"row {award.row}" if award else ""
-        self._addstr(4, 2, f"Remove {name} ({loc}) from @{self.results_username}?"[: w - 3], curses.color_pair(4) | curses.A_BOLD)
-        self._addstr(6, 2, 'Type "delete" to confirm:', curses.A_DIM)
-        self._addstr(7, 2, self.modal_input[: w - 4], curses.A_BOLD)
-        self._addstr(h - 2, 1, "Enter confirm · Esc cancel", curses.color_pair(3))
-        self._addstr(h - 1, 0, (self.error or self.status or "")[:w].ljust(w), curses.color_pair(3))
-        self._place_cursor(7, 2, self.modal_input, 2, w - 1)
-
-    def _result_lines(self) -> list[tuple[str, int]]:
-        if self.results_username is None:
-            return [
-                ("Type a username and press Enter.", curses.A_DIM),
-                ("Then Tab to the list: a=add, e=edit, d=delete.", curses.A_DIM),
-                ("Writes need OAuth: python3 main.py --login", curses.color_pair(7)),
-            ]
-        if not self.results and not self.duplicates:
-            return [
-                (f"No awards listed for @{self.results_username}.", curses.color_pair(3)),
-                ("Press a to add an award (list focus).", curses.A_DIM),
-            ]
-
-        lines: list[tuple[str, int]] = [
-            (f"Awards for @{self.results_username}", curses.A_BOLD | curses.color_pair(1)),
-            ("", curses.A_NORMAL),
-        ]
-        award_idx = 0
-
-        def append_award_block(items: list[Award], section_title: str | None, warn: bool) -> None:
-            nonlocal award_idx
-            if not items:
-                return
-            if section_title:
-                lines.append((section_title, curses.A_BOLD | curses.color_pair(4 if warn else 2)))
-            current_cat = None
-            for award in items:
-                label = CATEGORY_LABELS.get(award.category, award.category)
-                if section_title is None:
-                    if award.category != current_cat:
-                        current_cat = award.category
-                        count = sum(1 for a in items if a.category == award.category)
-                        lines.append((f"▸ {label} ({count})", curses.A_BOLD | curses.color_pair(2)))
-                selected = self.focus == "list" and award_idx == self.selected
-                prefix = "➤ " if selected else "  • "
-                if warn:
-                    attr = curses.color_pair(4) | (curses.A_BOLD if selected else 0)
-                else:
-                    attr = curses.color_pair(6) | curses.A_BOLD if selected else curses.A_NORMAL
-                loc = f"  · row {award.row}" if award.row else ""
-                cell_note = f'  raw: "{award.cell}"' if warn and award.cell else ""
-                lines.append((f"{prefix}{award.name}{loc}{cell_note}", attr))
-                award_idx += 1
-            if section_title:
-                lines.append(("", curses.A_NORMAL))
-
-        append_award_block(self.results, None, False)
-        if self.duplicates:
-            append_award_block(
-                self.duplicates,
-                f"▸ Duplicates / typos ({len(self.duplicates)})",
-                True,
-            )
-        return lines
-
-    def _addstr(self, y: int, x: int, text: str, attr: int = 0) -> None:
-        h, w = self.stdscr.getmaxyx()
-        if y < 0 or y >= h or x >= w:
-            return
+    @work(thread=True, exclusive=True, group="sync")
+    def refresh_data(self) -> None:
+        self.call_from_thread(self._set_status, "Syncing Badges / Ribbons / Foreign Awards…")
         try:
-            self.stdscr.addnstr(y, x, text, max(0, w - x - 1), attr)
-        except curses.error:
-            pass
+            data = build_awards_data()
+            synced = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            auth = auth_status()
+            auth_note = {
+                "service_account": "write: service account",
+                "oauth_token": "write: logged in",
+                "oauth_needs_login": "write: run --login",
+                "missing": "write: no credentials",
+            }.get(auth, auth)
+            status = f"Ready · {len(data.index)} users · {auth_note}"
+
+            def apply() -> None:
+                self.data = data
+                self.synced_at = synced
+                self.sub_title = f"Synced {synced}"
+                self._set_status(status)
+                if self.results_username:
+                    self._apply_user_view(self.results_username, status=status)
+
+            self.call_from_thread(apply)
+        except Exception as exc:  # noqa: BLE001
+            self.call_from_thread(self._set_status, "Sync failed")
+            self.call_from_thread(self.notify, str(exc), severity="error")
+        finally:
+            def done() -> None:
+                self._loading = False
+
+            self.call_from_thread(done)
+
+    def action_refresh(self) -> None:
+        if self._busy or self._loading:
+            self.notify("Wait for the current sheet operation to finish", severity="warning")
+            return
+        self._loading = True
+        self.refresh_data()
+
+    def action_audit(self) -> None:
+        if not self._begin_busy("Running duplicate audit…"):
+            return
+        self.run_audit()
+
+    @work(thread=True, exclusive=True, group="audit")
+    def run_audit(self) -> None:
+        try:
+            data = self.data
+            if data is None:
+                data = build_awards_data()
+
+                def store() -> None:
+                    self.data = data
+
+                self.call_from_thread(store)
+            report = collect_sheet_audit(data)
+            generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            body = format_audit_report(report, generated)
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
+            dest = ROOT / "audits" / f"audit-{stamp}.txt"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(body, encoding="utf-8")
+            groups = report["duplicate_groups"]
+            identical = sum(1 for g in groups if g["kind"] == "identical")
+            conflict = sum(1 for g in groups if g["kind"] == "conflict")
+            msg = (
+                f"Wrote {dest} · {identical} identical · {conflict} conflict · "
+                f"{len(report['similar_pairs'])} similar"
+            )
+
+            def apply() -> None:
+                self._set_status(msg)
+                self.notify(f"Audit saved to {dest.name}")
+
+            self.call_from_thread(apply)
+        except Exception as exc:  # noqa: BLE001
+
+            def fail() -> None:
+                self.notify(str(exc), severity="error")
+                self._set_status("Audit failed")
+
+            self.call_from_thread(fail)
+        finally:
+            self.call_from_thread(self._end_busy)
+
+    # --- actions pane --------------------------------------------------
+
+    @on(OptionList.OptionSelected, "#actions-list")
+    def on_action_selected(self, event: OptionList.OptionSelected) -> None:
+        aid = event.option_id
+        if aid == "act-lookup":
+            self.action_lookup()
+        elif aid == "act-add":
+            self.action_add()
+        elif aid == "act-edit":
+            self.action_edit()
+        elif aid == "act-delete":
+            self.action_delete()
+        elif aid == "act-refresh":
+            self.action_refresh()
+        elif aid == "act-audit":
+            self.action_audit()
+
+    @on(TabbedContent.TabActivated, "#award-tabs")
+    def on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        pane_id = event.pane.id if event.pane else "all"
+        self._active_tab = pane_id or "all"
+        self._refresh_awards_list()
+
+    @on(OptionList.OptionHighlighted, "#awards-list")
+    def on_award_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        idx = event.option_index
+        if 0 <= idx < len(self._visible):
+            self._show_detail(self._visible[idx])
+
+    @on(OptionList.OptionSelected, "#awards-list")
+    def on_award_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_id and event.option_id.startswith("aw-"):
+            idx = int(event.option_id.split("-", 1)[1])
+            if 0 <= idx < len(self._visible):
+                self._show_detail(self._visible[idx])
+
+    # --- add / edit / delete -------------------------------------------
+
+    @on(Button.Pressed, "#detail-edit")
+    def on_detail_edit(self) -> None:
+        self.action_edit()
+
+    @on(Button.Pressed, "#detail-delete")
+    def on_detail_delete(self) -> None:
+        self.action_delete()
+
+    @work
+    async def action_add(self) -> None:
+        if self._busy or self._loading:
+            self.notify("Wait for the current sheet operation to finish", severity="warning")
+            return
+        if not self.results_username:
+            self.notify("Look up a user before adding awards", severity="warning")
+            return
+        if not self.data:
+            self.notify("Still loading…", severity="warning")
+            return
+        owned = {(a.sheet, a.col) for a in self.results + self.duplicates}
+        candidates = [d for d in self.data.catalog if (d.sheet, d.col) not in owned]
+        if not candidates:
+            self.notify("No remaining awards to add for this user", severity="information")
+            return
+        result = await self.push_screen_wait(AddAwardScreen(candidates))
+        if not result:
+            return
+        award_def, suffix = result
+        if not self._begin_busy(f"Writing {award_def.base_name}…"):
+            return
+        self._commit_add(award_def, suffix)
+
+    @work(thread=True)
+    def _commit_add(self, award_def: AwardDef, suffix: str) -> None:
+        username = self.results_username or ""
+        rows = self.data.sheet_rows.get(award_def.sheet) if self.data else None
+        try:
+            result = add_award_to_user(
+                username=username,
+                award_def=award_def,
+                suffix=suffix,
+                rows=rows,
+                interactive_auth=False,
+            )
+
+            def apply() -> None:
+                if result.ok and result.award and self.data:
+                    upsert_award_in_index(self.data.index, result.award)
+                    self._patch_sheet_cell(
+                        result.award.sheet,
+                        result.award.col,
+                        result.award.row,
+                        result.award.cell,
+                    )
+                    self._apply_user_view(
+                        username, select=result.award, status=result.message
+                    )
+                    self.notify(result.message)
+                else:
+                    self.notify(result.message, severity="error")
+                    self._set_status("Add failed")
+
+            self.call_from_thread(apply)
+        except Exception as exc:  # noqa: BLE001
+            self.call_from_thread(self.notify, str(exc), severity="error")
+            self.call_from_thread(self._set_status, "Add failed")
+        finally:
+            self.call_from_thread(self._end_busy)
+
+    @work
+    async def action_edit(self) -> None:
+        if self._busy or self._loading:
+            self.notify("Wait for the current sheet operation to finish", severity="warning")
+            return
+        award = self._selected_award()
+        if not award:
+            self.notify("Select an award to edit", severity="warning")
+            return
+        new_cell = await self.push_screen_wait(EditAwardScreen(award))
+        if new_cell is None:
+            return
+        if not self._begin_busy("Updating sheet…"):
+            return
+        self._commit_edit(award, new_cell)
+
+    @work(thread=True)
+    def _commit_edit(self, award: Award, new_cell: str) -> None:
+        try:
+            result = update_award_cell(award, new_cell, interactive_auth=False)
+
+            def apply() -> None:
+                if result.ok and result.award and self.data:
+                    upsert_award_in_index(self.data.index, result.award)
+                    self._patch_sheet_cell(
+                        result.award.sheet,
+                        result.award.col,
+                        result.award.row,
+                        result.award.cell,
+                    )
+                    new_key = normalize_username(result.award.cell)
+                    viewed = (self.results_username or "").lower()
+                    if new_key and viewed and new_key != viewed:
+                        self._apply_user_view(
+                            viewed,
+                            status=f"{result.message} · no longer under @{viewed}",
+                        )
+                    elif self.results_username:
+                        self._apply_user_view(
+                            self.results_username,
+                            select=result.award,
+                            status=result.message,
+                        )
+                    self.notify(result.message)
+                else:
+                    self.notify(result.message, severity="error")
+                    self._set_status("Edit failed")
+
+            self.call_from_thread(apply)
+        except Exception as exc:  # noqa: BLE001
+            self.call_from_thread(self.notify, str(exc), severity="error")
+            self.call_from_thread(self._set_status, "Edit failed")
+        finally:
+            self.call_from_thread(self._end_busy)
+
+    @work
+    async def action_delete(self) -> None:
+        if self._busy or self._loading:
+            self.notify("Wait for the current sheet operation to finish", severity="warning")
+            return
+        award = self._selected_award()
+        if not award:
+            self.notify("Select an award to delete", severity="warning")
+            return
+        username = self.results_username or "?"
+        confirmed = await self.push_screen_wait(DeleteAwardScreen(award, username))
+        if not confirmed:
+            return
+        if not self._begin_busy(f"Removing {award.name}…"):
+            return
+        self._commit_delete(award)
+
+    @work(thread=True)
+    def _commit_delete(self, award: Award) -> None:
+        try:
+            result = remove_award(award, interactive_auth=False)
+
+            def apply() -> None:
+                if result.ok and self.data:
+                    reindex_column_after_delete(
+                        self.data.index, award.sheet, award.col, award.row
+                    )
+                    rows = self.data.sheet_rows.get(award.sheet)
+                    if rows is not None:
+                        shift_column_up_in_rows(
+                            rows, award.sheet, award.col, award.row
+                        )
+                    if self.results_username:
+                        self._apply_user_view(
+                            self.results_username, status=result.message
+                        )
+                    self.notify(result.message)
+                else:
+                    self.notify(result.message, severity="error")
+                    self._set_status("Delete failed")
+
+            self.call_from_thread(apply)
+        except Exception as exc:  # noqa: BLE001
+            self.call_from_thread(self.notify, str(exc), severity="error")
+            self.call_from_thread(self._set_status, "Delete failed")
+        finally:
+            self.call_from_thread(self._end_busy)
 
 
 def main() -> None:
-    curses.wrapper(lambda stdscr: AwardsTUI(stdscr).start())
+    _reexec_venv_if_needed()
+    AwardsApp().run()
 
 
 if __name__ == "__main__":

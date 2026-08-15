@@ -291,6 +291,35 @@ def test_upsert_award_moves_username() -> None:
     assert index.get("bob") in (None, [])
 
 
+def test_shift_column_up_on_delete() -> None:
+    from awards import (
+        Award,
+        reindex_column_after_delete,
+        shift_column_up_in_rows,
+    )
+
+    # Ribbons offset 8: sheet row 11 → csv index 2
+    rows = [
+        ["", "", "Title"],
+        ["", "", "alice"],
+        ["", "", "bob"],
+        ["", "", "carol"],
+    ]
+    shift_column_up_in_rows(rows, "Ribbons Database", "C", 11)  # delete bob
+    assert rows[1][2] == "alice"
+    assert rows[2][2] == "carol"
+    assert rows[3][2] == ""
+
+    a_alice = Award("ribbons", "A", sheet="Ribbons Database", col="C", row=10, cell="alice")
+    a_bob = Award("ribbons", "B", sheet="Ribbons Database", col="C", row=11, cell="bob")
+    a_carol = Award("ribbons", "C", sheet="Ribbons Database", col="C", row=12, cell="carol")
+    index = {"alice": [a_alice], "bob": [a_bob], "carol": [a_carol]}
+    reindex_column_after_delete(index, "Ribbons Database", "C", 11)
+    assert "bob" not in index
+    assert index["carol"][0].row == 11
+    assert index["alice"][0].row == 10
+
+
 if __name__ == "__main__":
     test_normalize()
     test_format_ribbon()
@@ -309,4 +338,5 @@ if __name__ == "__main__":
     test_flatten_order()
     test_awards_excluding_duplicate_rows()
     test_upsert_award_moves_username()
+    test_shift_column_up_on_delete()
     print("All offline tests passed.")

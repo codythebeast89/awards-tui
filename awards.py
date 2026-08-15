@@ -536,6 +536,59 @@ def drop_award_location(
             index.pop(key, None)
 
 
+def shift_column_up_in_rows(
+    rows: list[list[str]],
+    sheet: str,
+    col: str,
+    sheet_row: int,
+) -> None:
+    """Remove the cell at sheet_row in `col` and shift later cells in that column up."""
+    csv_i = sheet_row - 1 - row_offset(sheet)
+    col_idx = col_to_index(col)
+    if csv_i < 0 or not rows:
+        return
+    for r in range(csv_i, len(rows) - 1):
+        below = rows[r + 1][col_idx] if col_idx < len(rows[r + 1]) else ""
+        while len(rows[r]) <= col_idx:
+            rows[r].append("")
+        rows[r][col_idx] = below if below is not None else ""
+    last = len(rows) - 1
+    while len(rows[last]) <= col_idx:
+        rows[last].append("")
+    rows[last][col_idx] = ""
+
+
+def reindex_column_after_delete(
+    index: dict[str, list[Award]],
+    sheet: str,
+    col: str,
+    deleted_row: int,
+) -> None:
+    """Drop the deleted cell, then decrement row numbers below it in that column."""
+    drop_award_location(index, sheet, col, deleted_row)
+    for key, bucket in list(index.items()):
+        updated: list[Award] = []
+        for a in bucket:
+            if a.sheet == sheet and a.col == col and a.row > deleted_row:
+                updated.append(
+                    Award(
+                        category=a.category,
+                        name=a.name,
+                        sheet=a.sheet,
+                        col=a.col,
+                        row=a.row - 1,
+                        cell=a.cell,
+                        base_name=a.base_name,
+                    )
+                )
+            else:
+                updated.append(a)
+        if updated:
+            index[key] = updated
+        else:
+            index.pop(key, None)
+
+
 def upsert_award_in_index(index: dict[str, list[Award]], award: Award) -> str | None:
     """Place award under the username in its cell. Returns index key or None."""
     key = normalize_username(award.cell)

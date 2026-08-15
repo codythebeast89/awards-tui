@@ -200,22 +200,39 @@ def remove_award(
     *,
     interactive_auth: bool = True,
 ) -> EditResult:
+    """Clear the award cell and shift later entries in that column upward."""
     if not award.sheet or not award.col or not award.row:
         return EditResult(False, "Award has no sheet location (refresh and try again)")
     try:
         service = build_sheets_service(interactive=interactive_auth)
-        a1 = _a1(award.sheet, award.col, award.row)
-        _values_api(service).clear(
+        api = _values_api(service)
+        # Read from the deleted row through the end of the column.
+        tail_range = f"'{award.sheet}'!{award.col}{award.row}:{award.col}"
+        fetched = api.get(spreadsheetId=SHEET_ID, range=tail_range).execute()
+        col_vals = fetched.get("values") or []
+        # Drop the first cell (the deleted entry); keep the rest.
+        remaining = [(row[0] if row else "") for row in col_vals[1:]]
+        # Rewrite from the deleted row: shifted values + one blank to clear the old last cell.
+        write_vals = [[v] for v in remaining] + [[""]]
+        end_row = award.row + len(remaining)
+        write_range = _a1(award.sheet, award.col, award.row)
+        if end_row > award.row:
+            write_range = f"'{award.sheet}'!{award.col}{award.row}:{award.col}{end_row}"
+        api.update(
             spreadsheetId=SHEET_ID,
-            range=a1,
-            body={},
+            range=write_range,
+            valueInputOption="USER_ENTERED",
+            body={"values": write_vals},
         ).execute()
     except AuthError as exc:
         return EditResult(False, str(exc))
     except Exception as exc:  # noqa: BLE001
         return EditResult(False, f"Delete failed: {exc}")
 
-    return EditResult(True, f"Removed {award.name} from {award.col}{award.row}")
+    return EditResult(
+        True,
+        f"Removed {award.name} from {award.col}{award.row} (column shifted up)",
+    )
 
 
 # Re-export helper used by tests / callers
