@@ -42,7 +42,15 @@ def auth_status() -> str:
     if service_account_path():
         return "service_account"
     if TOKEN_PATH.is_file():
-        return "oauth_token"
+        try:
+            from google.oauth2.credentials import Credentials
+
+            creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+            if creds and (creds.valid or (creds.expired and creds.refresh_token)):
+                return "oauth_token"
+            return "oauth_needs_login"
+        except Exception:  # noqa: BLE001
+            return "oauth_needs_login"
     if credentials_path():
         return "oauth_needs_login"
     return "missing"
@@ -76,8 +84,15 @@ def get_credentials(*, interactive: bool = True):
         creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
 
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
+        try:
+            creds.refresh(Request())
+        except Exception as exc:  # noqa: BLE001
+            raise AuthError(f"Token refresh failed. Run: python3 main.py --login ({exc})") from exc
         TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
+        try:
+            TOKEN_PATH.chmod(0o600)
+        except OSError:
+            pass
         return creds
 
     if creds and creds.valid:
@@ -97,6 +112,10 @@ def get_credentials(*, interactive: bool = True):
     flow = InstalledAppFlow.from_client_secrets_file(str(oauth_path), SCOPES)
     creds = flow.run_local_server(port=0, prompt="consent")
     TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
+    try:
+        TOKEN_PATH.chmod(0o600)
+    except OSError:
+        pass
     return creds
 
 

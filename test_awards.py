@@ -197,6 +197,96 @@ def test_flatten_order() -> None:
     assert [a.category for a in flat] == ["badges", "badges", "ribbons", "foreign"]
 
 
+def test_awards_excluding_duplicate_rows() -> None:
+    from awards import (
+        Award,
+        AwardsData,
+        awards_excluding_duplicate_rows,
+        find_duplicates_for_user,
+        flatten_awards_sorted,
+        get_awards_for_username,
+    )
+
+    rows = [
+        ["", "", "hdr"],
+        ["", "", "x"],
+        ["", "", "Army Parachutist Badge"],
+        ["", "", "alice"],
+        ["", "", "alice"],
+        ["", "", "bob"],
+    ]
+    a1 = Award(
+        "badges",
+        "Army Parachutist Badge",
+        sheet="Badges Database",
+        col="C",
+        row=10,
+        cell="alice",
+        base_name="Army Parachutist Badge",
+    )
+    a2 = Award(
+        "badges",
+        "Army Parachutist Badge",
+        sheet="Badges Database",
+        col="C",
+        row=11,
+        cell="alice",
+        base_name="Army Parachutist Badge",
+    )
+    a3 = Award(
+        "badges",
+        "Army Parachutist Badge",
+        sheet="Badges Database",
+        col="C",
+        row=12,
+        cell="bob",
+        base_name="Army Parachutist Badge",
+    )
+    data = AwardsData(
+        index={"alice": [a1, a2], "bob": [a3]},
+        catalog=[],
+        sheet_rows={"Badges Database": rows},
+    )
+    hits = find_duplicates_for_user(data, "alice")
+    primary = awards_excluding_duplicate_rows(
+        flatten_awards_sorted(get_awards_for_username(data.index, "alice")),
+        hits,
+    )
+    assert primary == []
+    assert len(hits) == 2
+
+
+def test_upsert_award_moves_username() -> None:
+    from awards import Award, drop_award_location, upsert_award_in_index
+
+    award = Award(
+        "ribbons",
+        "Army Achievement",
+        sheet="Ribbons Database",
+        col="C",
+        row=5,
+        cell="Alice",
+        base_name="Army Achievement",
+    )
+    index: dict = {"alice": [award]}
+    moved = Award(
+        "ribbons",
+        "Army Achievement",
+        sheet="Ribbons Database",
+        col="C",
+        row=5,
+        cell="Bob x2",
+        base_name="Army Achievement",
+    )
+    key = upsert_award_in_index(index, moved)
+    assert key == "bob"
+    assert index.get("alice") in (None, [])
+    assert len(index["bob"]) == 1
+    assert index["bob"][0].cell == "Bob x2"
+    drop_award_location(index, "Ribbons Database", "C", 5)
+    assert index.get("bob") in (None, [])
+
+
 if __name__ == "__main__":
     test_normalize()
     test_format_ribbon()
@@ -213,4 +303,6 @@ if __name__ == "__main__":
     test_find_duplicates_for_user()
     test_duplicate_identical_vs_conflict()
     test_flatten_order()
+    test_awards_excluding_duplicate_rows()
+    test_upsert_award_moves_username()
     print("All offline tests passed.")

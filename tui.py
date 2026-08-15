@@ -35,13 +35,16 @@ from awards import (
     Award,
     AwardDef,
     AwardsData,
+    awards_excluding_duplicate_rows,
     build_awards_data,
     col_to_index,
+    drop_award_location,
     find_duplicates_for_user,
     flatten_awards_sorted,
     get_awards_for_username,
     normalize_username,
     row_offset,
+    upsert_award_in_index,
 )
 from sheets_auth import auth_status
 from sheets_edit import add_award_to_user, remove_award, update_award_cell
@@ -86,6 +89,16 @@ class AwardsTUI:
     def _clamp_selected(self) -> None:
         n = len(self.all_entries())
         self.selected = min(self.selected, max(0, n - 1)) if n else 0
+
+    def _begin_busy(self, status: str) -> bool:
+        """Claim the write lock on the main thread before starting a worker."""
+        if self._busy or self._loading:
+            self.status = "Wait for the current sheet operation to finish"
+            return False
+        self._busy = True
+        self.status = status
+        self.error = None
+        return True
 
     def _clamp_cursor(self, text: str) -> None:
         self.cursor = max(0, min(self.cursor, len(text)))
@@ -346,16 +359,13 @@ class AwardsTUI:
         if not self.pending_award_def or not self.results_username or not self.data:
             self.mode = "main"
             return
-        if self._busy:
+        if not self._begin_busy(f"Writing {self.pending_award_def.base_name}…"):
             return
         award_def = self.pending_award_def
         username = self.results_username
         rows = self.data.sheet_rows.get(award_def.sheet)
 
         def worker() -> None:
-            self._busy = True
-            self.status = f"Writing {award_def.base_name}…"
-            self.error = None
             try:
                 result = add_award_to_user(
                     username=username,
@@ -366,8 +376,7 @@ class AwardsTUI:
                 )
                 if result.ok and result.award:
                     if self.data:
-                        bucket = self.data.index.setdefault(username.lower(), [])
-                        bucket.append(result.award)
+                        upsert_award_in_index(self.data.index, result.award)
                         self._patch_sheet_cell(
                             result.award.sheet,
                             result.award.col,
@@ -414,35 +423,34 @@ class AwardsTUI:
 
     def _commit_edit(self) -> None:
         award = self.pending_award or self._selected_entry()
-        if not award or self._busy:
+        if not award:
+            return
+        if not self._begin_busy("Updating sheet…"):
             return
         new_cell = self.modal_input
 
         def worker() -> None:
-            self._busy = True
-            self.status = "Updating sheet…"
-            self.error = None
             try:
                 result = update_award_cell(award, new_cell, interactive_auth=False)
                 self.mode = "main"
                 self.pending_award = None
                 if result.ok and result.award:
-                    if self.data and self.results_username:
-                        key = self.results_username.lower()
-                        self.data.index[key] = [
-                            a
-                            for a in self.data.index.get(key, [])
-                            if not (a.sheet == award.sheet and a.col == award.col and a.row == award.row)
-                        ]
-                        self.data.index[key].append(result.award)
+                    if self.data:
+                        upsert_award_in_index(self.data.index, result.award)
                         self._patch_sheet_cell(
                             result.award.sheet,
                             result.award.col,
                             result.award.row,
                             result.award.cell,
                         )
-                    self._sync_user_view(select_award=result.award)
-                    self.status = result.message
+                    new_key = normalize_username(result.award.cell)
+                    viewed = (self.results_username or "").lower()
+                    if new_key and viewed and new_key != viewed:
+                        self._sync_user_view(preserve_selection=True)
+                        self.status = f"{result.message} · no longer under @{viewed}"
+                    else:
+                        self._sync_user_view(select_award=result.award)
+                        self.status = result.message
                 else:
                     self.error = result.message
                     self.status = "Edit failed"
@@ -471,26 +479,22 @@ class AwardsTUI:
 
     def _commit_delete(self) -> None:
         award = self.pending_award or self._selected_entry()
-        if not award or self._busy:
+        if not award:
+            return
+        if not self._begin_busy(f"Removing {award.name}…"):
             return
 
         def worker() -> None:
-            self._busy = True
-            self.status = f"Removing {award.name}…"
-            self.error = None
             try:
                 result = remove_award(award, interactive_auth=False)
                 # Leave confirm screen before list mutation so draw cannot race.
                 self.mode = "main"
                 self.pending_award = None
                 if result.ok:
-                    if self.data and self.results_username:
-                        key = self.results_username.lower()
-                        self.data.index[key] = [
-                            a
-                            for a in self.data.index.get(key, [])
-                            if not (a.sheet == award.sheet and a.col == award.col and a.row == award.row)
-                        ]
+                    if self.data:
+                        drop_award_location(
+                            self.data.index, award.sheet, award.col, award.row
+                        )
                         self._patch_sheet_cell(award.sheet, award.col, award.row, "")
                     self._sync_user_view(preserve_selection=True)
                     self.status = result.message
@@ -503,32 +507,40 @@ class AwardsTUI:
         threading.Thread(target=worker, daemon=True).start()
 
     def refresh_data(self, async_: bool = True) -> None:
-        if self._loading or self._busy:
+        if self.mode != "main":
+            self.status = "Finish the current dialog before refreshing"
             return
+        with self._load_lock:
+            if self._loading or self._busy:
+                return
+            self._loading = True
+            self.status = "Syncing Badges / Ribbons / Foreign Awards…"
+            self.error = None
 
         def worker() -> None:
-            with self._load_lock:
-                self._loading = True
-                self.status = "Syncing Badges / Ribbons / Foreign Awards…"
-                self.error = None
-                try:
-                    data = build_awards_data()
-                    self.data = data
-                    self.synced_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-                    auth = auth_status()
-                    auth_note = {
-                        "service_account": "write: service account",
-                        "oauth_token": "write: logged in",
-                        "oauth_needs_login": "write: run --login",
-                        "missing": "write: no credentials",
-                    }.get(auth, auth)
-                    self.status = f"Ready · {len(data.index)} users · {auth_note}"
-                    if self.results_username:
-                        self.lookup(silent=True, preserve_view=True)
-                except Exception as exc:  # noqa: BLE001
-                    self.error = str(exc)
-                    self.status = "Sync failed"
-                finally:
+            try:
+                data = build_awards_data()
+                self.data = data
+                self.synced_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                auth = auth_status()
+                auth_note = {
+                    "service_account": "write: service account",
+                    "oauth_token": "write: logged in",
+                    "oauth_needs_login": "write: run --login",
+                    "missing": "write: no credentials",
+                }.get(auth, auth)
+                self.status = f"Ready · {len(data.index)} users · {auth_note}"
+                if self.results_username:
+                    self.lookup(
+                        silent=True,
+                        preserve_view=True,
+                        username=self.results_username,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self.error = str(exc)
+                self.status = "Sync failed"
+            finally:
+                with self._load_lock:
                     self._loading = False
 
         if async_:
@@ -536,8 +548,16 @@ class AwardsTUI:
         else:
             worker()
 
-    def lookup(self, silent: bool = False, preserve_view: bool = False) -> None:
-        username = normalize_username(self.query) or self.query.strip().lstrip("@")
+    def lookup(
+        self,
+        silent: bool = False,
+        preserve_view: bool = False,
+        username: str | None = None,
+    ) -> None:
+        if username is None:
+            username = normalize_username(self.query) or self.query.strip().lstrip("@")
+        else:
+            username = normalize_username(username) or username.strip().lstrip("@")
         if not username:
             if not silent:
                 self.status = "Enter a username"
@@ -546,24 +566,26 @@ class AwardsTUI:
             self.status = "Still loading awards…"
             return
         prev_scroll = self.scroll
+        prev_focus = self.focus
         awards = flatten_awards_sorted(get_awards_for_username(self.data.index, username))
         dup_hits = find_duplicates_for_user(self.data, username)
+        awards = awards_excluding_duplicate_rows(awards, dup_hits)
         self.results_username = username
         self.results = awards
         self.duplicates = [h.to_award() for h in dup_hits]
         if preserve_view:
             self._clamp_selected()
             self.scroll = prev_scroll
+            self.focus = prev_focus
         else:
             self.scroll = 0
             self.selected = 0
-        self.focus = "list" if (awards or self.duplicates) else "search"
+            self.focus = "list"
         dup_note = f" · {len(self.duplicates)} duplicate(s)" if self.duplicates else ""
         if awards or self.duplicates:
             self.status = f"{username} · {len(awards)} award(s){dup_note} · Tab list/search · a/e/d"
         else:
             self.status = f"No awards for {username} · press a to add"
-            self.focus = "list"
 
     def _patch_sheet_cell(self, sheet: str, col: str, row: int, value: str) -> None:
         """Keep cached sheet rows aligned with local edits between refreshes."""
@@ -592,10 +614,13 @@ class AwardsTUI:
         prev_selected = self.selected
         prev_scroll = self.scroll
         username = self.results_username
-        self.results = flatten_awards_sorted(
+        awards = flatten_awards_sorted(
             get_awards_for_username(self.data.index, username),
         )
-        self.duplicates = [h.to_award() for h in find_duplicates_for_user(self.data, username)]
+        dup_hits = find_duplicates_for_user(self.data, username)
+        awards = awards_excluding_duplicate_rows(awards, dup_hits)
+        self.results = awards
+        self.duplicates = [h.to_award() for h in dup_hits]
         if select_award:
             entries = self.all_entries()
             self.selected = next(
@@ -613,11 +638,34 @@ class AwardsTUI:
             self.scroll = prev_scroll
         self._ensure_selected_visible()
 
+    def _selected_line_index(self) -> int | None:
+        """Map the selected award index to its line in `_result_lines`."""
+        if not self.results and not self.duplicates:
+            return None
+        line = 2  # title + blank
+        award_idx = 0
+        current_cat = None
+        for award in self.results:
+            if award.category != current_cat:
+                current_cat = award.category
+                line += 1  # category header
+            if award_idx == self.selected:
+                return line
+            line += 1
+            award_idx += 1
+        if self.duplicates:
+            line += 1  # duplicates section header
+            for _award in self.duplicates:
+                if award_idx == self.selected:
+                    return line
+                line += 1
+                award_idx += 1
+        return None
+
     def _ensure_selected_visible(self) -> None:
-        # Selection index maps to award entries in flattened list; scroll tracks line view.
-        # Keep simple: scroll so selected award line is on screen approximately.
-        # Lines are header + categories; approximate by selected offset.
-        target = 2 + self.selected
+        target = self._selected_line_index()
+        if target is None:
+            target = 2 + self.selected
         h, _ = self.stdscr.getmaxyx()
         view_h = max(1, h - 9)
         if target < self.scroll:

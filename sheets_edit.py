@@ -9,6 +9,7 @@ from awards import (
     SHEET_META,
     Award,
     AwardDef,
+    clean_cell,
     col_to_index,
     csv_index_to_sheet_row,
     format_award_name,
@@ -73,7 +74,7 @@ def find_first_empty_row(rows: list[list[str]], sheet: str, col: str) -> int:
     for r in range(start, len(rows)):
         row = rows[r]
         cell = row[col_idx] if col_idx < len(row) else ""
-        if cell and str(cell).strip():
+        if clean_cell(str(cell) if cell else ""):
             last_filled = r
             continue
         return csv_index_to_sheet_row(sheet, r)
@@ -118,16 +119,16 @@ def add_award_to_user(
                 return EditResult(False, f"@{user} already has {award_def.base_name} (row {i + 1})")
         for i in range(start - 1, len(col_vals)):
             cell = col_vals[i][0] if col_vals[i] else ""
-            if not str(cell).strip():
+            if not clean_cell(str(cell) if cell else ""):
                 target_row = i + 1
                 break
         if target_row is None:
             target_row = max(len(col_vals) + 1, start)
-    except Exception:
-        if rows is not None:
-            target_row = find_first_empty_row(rows, award_def.sheet, award_def.col)
-        else:
-            target_row = sheet_data_start_row(award_def.sheet)
+    except Exception as exc:  # noqa: BLE001
+        return EditResult(
+            False,
+            f"Could not re-read {award_def.sheet}!{award_def.col} to place the award: {exc}",
+        )
 
     a1 = _a1(award_def.sheet, award_def.col, target_row)
     try:

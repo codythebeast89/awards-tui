@@ -519,6 +519,42 @@ def get_awards_for_username(index: dict[str, list[Award]], username: str) -> lis
     return list(index.get(key, []))
 
 
+def drop_award_location(
+    index: dict[str, list[Award]],
+    sheet: str,
+    col: str,
+    row: int,
+) -> None:
+    """Remove any index entries pointing at this sheet cell (all users)."""
+    for key, bucket in list(index.items()):
+        filtered = [
+            a for a in bucket if not (a.sheet == sheet and a.col == col and a.row == row)
+        ]
+        if filtered:
+            index[key] = filtered
+        else:
+            index.pop(key, None)
+
+
+def upsert_award_in_index(index: dict[str, list[Award]], award: Award) -> str | None:
+    """Place award under the username in its cell. Returns index key or None."""
+    key = normalize_username(award.cell)
+    if not key:
+        return None
+    drop_award_location(index, award.sheet, award.col, award.row)
+    add_award(index, key, award)
+    return key
+
+
+def awards_excluding_duplicate_rows(
+    awards: list[Award],
+    dup_hits: list[DuplicateHit],
+) -> list[Award]:
+    """Keep duplicate/typo rows only in the duplicates section, not the main list."""
+    keys = {(h.sheet, h.col, h.row) for h in dup_hits}
+    return [a for a in awards if (a.sheet, a.col, a.row) not in keys]
+
+
 def group_awards(awards: list[Award]) -> dict[str, list[str]]:
     grouped = {label: [] for label in CATEGORY_LABELS.values()}
     for award in awards:
