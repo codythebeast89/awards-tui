@@ -78,7 +78,7 @@ python3 main.py SomeUsername --add "Combat Action Badge" --suffix "x2"
 - Lookups use the public CSV export (no credentials required).
 - Add/edit/delete use the Sheets API and require OAuth or a service account.
 - Award cells are written like `Username`, `Username x2`, or `Username - detail`.
-- Badges sheet row numbers in the TUI include a +6 offset so they match live Google Sheet rows (CSV export lags the sheet).
+- Sheet row numbers in the TUI include CSV→live offsets so they match Google Sheets: Badges **+6**, Ribbons **+8**, Foreign Awards **+7** (public CSV export lags the live sheet).
 - **Do not commit** `credentials.json`, `token.json`, or `service_account.json`.
 
 ## Development

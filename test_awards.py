@@ -176,14 +176,18 @@ def test_find_first_empty() -> None:
         ["", "", ""],
         ["", "", "user2"],
     ]
-    assert find_first_empty_row(rows, "Ribbons Database", "C") == 3
+    assert find_first_empty_row(rows, "Ribbons Database", "C") == 11  # csv row 3 + ribbons offset 8
 
 
 def test_badges_row_offset() -> None:
-    from awards import csv_index_to_sheet_row
+    from awards import csv_index_to_sheet_row, sheet_data_start_row
 
     assert csv_index_to_sheet_row("Badges Database", 49) == 56
-    assert csv_index_to_sheet_row("Ribbons Database", 49) == 50
+    assert csv_index_to_sheet_row("Ribbons Database", 49) == 58  # CSV +8 vs live sheet
+    assert csv_index_to_sheet_row("Ribbons Database", 305) == 314  # ocpstandard NCO PD
+    assert sheet_data_start_row("Ribbons Database") == 10
+    assert csv_index_to_sheet_row("Foreign Awards Database", 49) == 57  # CSV +7
+    assert sheet_data_start_row("Foreign Awards Database") == 10
 
 
 def test_flatten_order() -> None:
