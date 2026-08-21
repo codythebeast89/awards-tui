@@ -13,4 +13,5 @@ path = "src/main.rs"
 awards-core = { workspace = true }
 awards-sheets = { workspace = true }
 anyhow = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true }

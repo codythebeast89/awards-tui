@@ -3,9 +3,14 @@ name = "awards-sheets"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Google Sheets CSV fetch and write helpers (stub until M2/M3)"
+description = "Google Sheets CSV fetch and write helpers"
 
 [dependencies]
 awards-core = { workspace = true }
+anyhow = { workspace = true }
+csv = { workspace = true }
+reqwest = { workspace = true }
+thiserror = { workspace = true }
+urlencoding = { workspace = true }
 
 [dev-dependencies]

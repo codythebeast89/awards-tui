@@ -17,9 +17,13 @@ repository = "https://github.com/codythebeast89/awards-tui"
 awards-core = { path = "crates/awards-core" }
 awards-sheets = { path = "crates/awards-sheets" }
 anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
+csv = "1"
 regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 strsim = "0.11"
+urlencoding = "2"

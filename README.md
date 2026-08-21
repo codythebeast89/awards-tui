@@ -94,7 +94,7 @@ cargo test --workspace
 cargo run -p awards-tui -- --help
 ```
 
-`awards-core` ports the offline logic from `awards.py` (M0/M1). Sheets I/O and Ratatui TUI come later (M2–M4).
+`awards-core` ports the offline logic from `awards.py` (M0/M1). CSV lookup + `--audit` work via `cargo run -p awards-tui -- <user>` / `--audit` (M2). Writes and Ratatui TUI come later (M3–M4).
 
 ## License
 
