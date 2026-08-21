@@ -267,6 +267,7 @@ impl App {
             KeyCode::Char('a') if self.focus != FocusArea::Username => self.action_add(),
             KeyCode::Char('e') if self.focus != FocusArea::Username => self.action_edit(),
             KeyCode::Char('d') if self.focus != FocusArea::Username => self.action_delete(),
+            KeyCode::Enter if self.focus == FocusArea::Detail => self.action_edit(),
             _ => match self.focus {
                 FocusArea::Username => {
                     let event = CrosstermEvent::Key(key);
@@ -274,7 +275,7 @@ impl App {
                 }
                 FocusArea::Actions => self.handle_actions_key(key),
                 FocusArea::Awards => self.handle_awards_key(key),
-                FocusArea::Detail => {}
+                FocusArea::Detail => self.handle_detail_key(key),
             },
         }
     }
@@ -409,7 +410,17 @@ impl App {
                     self.refresh_visible(None);
                 }
             }
-            KeyCode::Enter => {}
+            KeyCode::Enter => self.action_edit(),
+            _ => {}
+        }
+    }
+
+    fn handle_detail_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('e') => self.action_edit(),
+            KeyCode::Char('d') => self.action_delete(),
+            KeyCode::Up => self.move_award(-1),
+            KeyCode::Down => self.move_award(1),
             _ => {}
         }
     }

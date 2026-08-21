@@ -19,16 +19,16 @@ awards-sheets = { path = "crates/awards-sheets" }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 clap = { version = "4", features = ["derive"] }
-crossterm = "0.28"
+crossterm = "0.29"
 csv = "1"
-jsonwebtoken = "9"
+jsonwebtoken = { version = "10.3", default-features = false, features = ["use_pem", "rust_crypto"] }
 open = "5"
-ratatui = "0.29"
+ratatui = "0.30"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 strsim = "0.11"
-tui-input = "0.11"
+tui-input = "0.15"
 urlencoding = "2"

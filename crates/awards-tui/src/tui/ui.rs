@@ -253,7 +253,7 @@ fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
 fn render_footer(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(
         Paragraph::new(
-            "Ctrl+Q quit · Tab focus · a add · e edit · d delete · F5/Ctrl+R refresh · [ ] tabs",
+            "Ctrl+Q quit · Tab focus · Enter/e edit · d delete · a add · F5 refresh · [ ] tabs",
         )
         .style(Style::default().fg(MUTED).bg(PANEL_ALT)),
         area,

@@ -158,10 +158,29 @@ pub fn build_awards_data_from_rows(
 }
 
 /// Fetch all tabs and build the awards index (network).
+///
+/// Sheet tabs are fetched in parallel — the public CSV endpoints are independent.
 pub fn build_awards_data(columns: Option<Vec<AwardColumn>>) -> Result<AwardsData> {
+    use std::thread;
+
+    let handles: Vec<_> = SHEET_NAMES
+        .iter()
+        .map(|&sheet_name| {
+            thread::spawn(move || {
+                fetch_sheet(sheet_name).map(|rows| (sheet_name.to_string(), rows))
+            })
+        })
+        .collect();
+
     let mut sheet_rows = HashMap::new();
-    for &sheet_name in SHEET_NAMES {
-        sheet_rows.insert(sheet_name.to_string(), fetch_sheet(sheet_name)?);
+    for handle in handles {
+        let (name, rows) = handle
+            .join()
+            .map_err(|_| SheetsError::Network {
+                sheet: "(unknown)".into(),
+                reason: "sheet fetch thread panicked".into(),
+            })??;
+        sheet_rows.insert(name, rows);
     }
     Ok(build_awards_data_from_rows(sheet_rows, columns))
 }
