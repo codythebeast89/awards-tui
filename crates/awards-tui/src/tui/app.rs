@@ -31,6 +31,7 @@ const ACTIONS: &[Action] = &[
 pub enum WorkerMsg {
     SyncDone(Result<AwardsData, String>),
     RowsFixed {
+        gen: u64,
         username: String,
         results: Vec<Award>,
         duplicates: Vec<Award>,
@@ -190,6 +191,7 @@ pub struct App {
     pub config: AppConfig,
     tx: Sender<WorkerMsg>,
     pending_delete: Option<Award>,
+    reconcile_gen: u64,
 }
 
 impl App {
@@ -222,6 +224,7 @@ impl App {
             config,
             tx,
             pending_delete: None,
+            reconcile_gen: 0,
         }
     }
 
@@ -243,10 +246,11 @@ impl App {
         match msg {
             WorkerMsg::SyncDone(result) => self.handle_sync_done(result),
             WorkerMsg::RowsFixed {
+                gen,
                 username,
                 results,
                 duplicates,
-            } => self.handle_rows_fixed(username, results, duplicates),
+            } => self.handle_rows_fixed(gen, username, results, duplicates),
             WorkerMsg::WriteDone {
                 kind,
                 result,
@@ -347,7 +351,16 @@ impl App {
         }
     }
 
-    fn handle_rows_fixed(&mut self, username: String, results: Vec<Award>, duplicates: Vec<Award>) {
+    fn handle_rows_fixed(
+        &mut self,
+        gen: u64,
+        username: String,
+        results: Vec<Award>,
+        duplicates: Vec<Award>,
+    ) {
+        if gen != self.reconcile_gen {
+            return;
+        }
         if self.results_username.as_deref() != Some(username.as_str()) {
             return;
         }
@@ -889,10 +902,12 @@ impl App {
         }
     }
 
-    fn spawn_row_reconcile(&self, username: String) {
+    fn spawn_row_reconcile(&mut self, username: String) {
         if !matches!(auth_status(), "service_account" | "oauth_token") {
             return;
         }
+        self.reconcile_gen = self.reconcile_gen.wrapping_add(1);
+        let gen = self.reconcile_gen;
         let results = self.results.clone();
         let duplicates = self.duplicates.clone();
         let tx = self.tx.clone();
@@ -904,6 +919,7 @@ impl App {
             let fixed_dups = resolve_live_rows(&api, &duplicates);
             if fixed_results != results || fixed_dups != duplicates {
                 let _ = tx.send(WorkerMsg::RowsFixed {
+                    gen,
                     username,
                     results: fixed_results,
                     duplicates: fixed_dups,

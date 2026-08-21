@@ -130,6 +130,7 @@ dependencies = [
  "awards-core",
  "chrono",
  "csv",
+ "dirs",
  "jsonwebtoken",
  "open",
  "reqwest",

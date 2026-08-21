@@ -332,10 +332,12 @@ pub fn collect_sheet_audit(data: &AwardsData) -> AuditReport {
         let mut users: Vec<String> = recs.iter().map(|(_r, _c, u)| u.clone()).collect();
         users.sort();
         users.dedup();
+        // Bucket by first 3 chars to match usernames_similar's prefix>=3 gate,
+        // so early-character typos past index 2 are still compared.
         let mut buckets: HashMap<String, Vec<String>> = HashMap::new();
         for name in &users {
-            let key = if name.len() >= 4 {
-                name[..4].to_string()
+            let key = if name.len() >= 3 {
+                name.chars().take(3).collect::<String>()
             } else {
                 name.clone()
             };

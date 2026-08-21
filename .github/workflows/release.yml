@@ -27,7 +27,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: Build release binary
-        run: cargo build -p awards-tui --release --target ${{ matrix.target }}
+        run: cargo build -p awards-tui --release --locked --target ${{ matrix.target }}
       - name: Package (cargo-binstall layout)
         shell: bash
         run: |

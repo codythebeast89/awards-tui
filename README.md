@@ -43,6 +43,12 @@ brew install --HEAD codythebeast89/awards-tui/awards-tui
 
 ## Setup (write access)
 
+Credentials are resolved from:
+
+1. `AWARDS_ROOT` (if set)
+2. The current directory (when it contains `award_columns.json`, `credentials.json`, `token.json`, etc.)
+3. `~/.config/awards-tui/` (created for installed binaries via binstall/Homebrew)
+
 A Google **API key alone cannot edit** the sheet. Use OAuth as your Logistics Clerk Google account (or a service account shared on the sheet).
 
 1. In [Google Cloud Console](https://console.cloud.google.com/): create/select a project → enable **Google Sheets API**.
@@ -106,6 +112,8 @@ awards-tui SomeUsername
 awards-tui --audit
 awards-tui --audit-out ~/Desktop/decorations-audit.txt
 awards-tui SomeUsername --add "Army Service" --suffix "x2"
+awards-tui SomeUsername --edit "Army Service" --cell "SomeUsername x2"
+awards-tui SomeUsername --delete "Army Service"
 awards-tui --login
 awards-tui --auth-status
 ```
@@ -117,7 +125,7 @@ awards-tui --auth-status
 - Delete clears the award cell and **shifts that column up** so no blank hole is left.
 - Award cells are written like `Username`, `Username x2`, or `Username - detail`.
 - Sheet row numbers include CSV→live offsets: Badges **+6**, Ribbons **+8**, Foreign Awards **+7**. When logged in, lookup reconciles mid-sheet lag against the live sheet.
-- Shared config at repo root: `award_columns.json`, `credentials.json`, `token.json`.
+- Shared config: `award_columns.json`, `credentials.json`, `token.json` (repo cwd, `AWARDS_ROOT`, or `~/.config/awards-tui/`).
 - **Do not commit** `credentials.json`, `token.json`, or `service_account.json`.
 
 ## Development

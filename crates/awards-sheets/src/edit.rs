@@ -125,6 +125,23 @@ pub fn add_award_to_user(
     }
     let target_row = target_row.unwrap_or_else(|| (col_vals.len() as i32 + 1).max(start));
 
+    // Re-check the chosen cell immediately before write to shrink lost-update races.
+    match live_cell_value(&api, &award_def.sheet, &award_def.col, target_row) {
+        Ok(live) if !live.is_empty() => {
+            return EditResult::err(format!(
+                "{}{} was filled by another edit (now {live:?}). Refresh and try again.",
+                award_def.col, target_row
+            ));
+        }
+        Err(e) => {
+            return EditResult::err(format!(
+                "Could not re-check {}!{}{} before write: {e}",
+                award_def.sheet, award_def.col, target_row
+            ));
+        }
+        Ok(_) => {}
+    }
+
     let range = a1(&award_def.sheet, &award_def.col, target_row);
     if let Err(e) = api.update_values(&range, vec![vec![cell_value.clone()]]) {
         return EditResult::err(format!("Write failed: {e}"));
@@ -178,6 +195,41 @@ pub fn update_award_cell(award: &Award, new_cell: &str, interactive_auth: bool) 
 
     let mut award = award.clone();
     award.row = live_row;
+
+    let expected = clean_cell(Some(&award.cell));
+    let live = match live_cell_value(&api, &award.sheet, &award.col, award.row) {
+        Ok(v) => v,
+        Err(e) => return EditResult::err(format!("Update failed: {e}")),
+    };
+    if live != expected {
+        return EditResult::err(cell_stale_message(&award, &live));
+    }
+
+    let Some(new_key) = normalize_username(Some(new_cell)) else {
+        return EditResult::err("Cell must start with a username");
+    };
+    let old_key = normalize_username(Some(&award.cell));
+    if old_key.as_deref() != Some(new_key.as_str()) {
+        let col_range = format!("'{}'!{}:{}", award.sheet, award.col, award.col);
+        let col_vals = match api.get_values(&col_range) {
+            Ok(v) => v,
+            Err(e) => return EditResult::err(format!("Update failed: {e}")),
+        };
+        let start = sheet_data_start_row(&award.sheet);
+        for (i, row) in col_vals.iter().enumerate().skip((start - 1) as usize) {
+            let sheet_row = (i + 1) as i32;
+            if sheet_row == award.row {
+                continue;
+            }
+            let cell = row.first().map(|s| s.as_str()).unwrap_or("");
+            if normalize_username(Some(cell)).as_deref() == Some(new_key.as_str()) {
+                return EditResult::err(format!(
+                    "@{new_key} already has this award column (row {sheet_row})"
+                ));
+            }
+        }
+    }
+
     let range = a1(&award.sheet, &award.col, award.row);
     if let Err(e) = api.update_values(&range, vec![vec![new_cell.to_string()]]) {
         return EditResult::err(format!("Update failed: {e}"));
@@ -243,6 +295,15 @@ pub fn remove_award(award: &Award, interactive_auth: bool) -> EditResult {
         .skip(1)
         .map(|row| row.first().cloned().unwrap_or_default())
         .collect();
+    // Final stale check right before the column rewrite.
+    let live_again = match live_cell_value(&api, &award.sheet, &award.col, award.row) {
+        Ok(v) => v,
+        Err(e) => return EditResult::err(format!("Delete failed: {e}")),
+    };
+    if live_again != clean_cell(Some(&award.cell)) {
+        return EditResult::err(cell_stale_message(&award, &live_again));
+    }
+
     let mut write_vals: Vec<Vec<String>> = remaining.iter().map(|v| vec![v.clone()]).collect();
     write_vals.push(vec![String::new()]);
     let end_row = award.row + remaining.len() as i32;

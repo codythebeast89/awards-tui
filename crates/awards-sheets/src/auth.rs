@@ -38,17 +38,51 @@ impl AuthError {
     }
 }
 
-/// Project root: `AWARDS_ROOT`, else cwd with `award_columns.json`, else workspace root.
+/// Resolve the data directory for credentials, tokens, audits, and column config.
+///
+/// Order:
+/// 1. `AWARDS_ROOT`
+/// 2. cwd if it already holds project/auth files
+/// 3. `~/.config/awards-tui` (created if needed) for installed binaries
+/// 4. cargo workspace root when developing from a checkout
 pub fn project_root() -> PathBuf {
     if let Ok(root) = std::env::var("AWARDS_ROOT") {
         return PathBuf::from(root);
     }
     if let Ok(cwd) = std::env::current_dir() {
-        if cwd.join("award_columns.json").is_file() || cwd.join("credentials.json").is_file() {
+        if looks_like_project_dir(&cwd) {
             return cwd;
         }
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    if let Some(config) = dirs::config_dir() {
+        let dir = config.join("awards-tui");
+        if looks_like_project_dir(&dir) || dir.is_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            return dir;
+        }
+        let _ = std::fs::create_dir_all(&dir);
+        return dir;
+    }
+    let cargo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if looks_like_project_dir(&cargo_root) {
+        return cargo_root;
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn looks_like_project_dir(dir: &Path) -> bool {
+    [
+        "award_columns.json",
+        "credentials.json",
+        "client_secret.json",
+        "oauth_credentials.json",
+        "service_account.json",
+        "service-account.json",
+        "token.json",
+        "awards-tui.toml",
+    ]
+    .iter()
+    .any(|name| dir.join(name).is_file())
 }
 
 fn find_existing(root: &Path, names: &[&str]) -> Option<PathBuf> {
@@ -133,11 +167,24 @@ fn load_authorized_user(path: &Path) -> Result<AuthorizedUser, AuthError> {
 
 fn save_authorized_user(path: &Path, tok: &AuthorizedUser) -> Result<(), AuthError> {
     let text = serde_json::to_string_pretty(tok)?;
-    std::fs::write(path, text)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(text.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, text)?;
     }
     Ok(())
 }
@@ -330,6 +377,7 @@ pub fn get_access_token(interactive: bool) -> Result<String, AuthError> {
 fn interactive_login(oauth_path: &Path) -> Result<String, AuthError> {
     let client = load_oauth_client(oauth_path)?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
     let redirect = format!("http://127.0.0.1:{port}/");
     let auth_uri = client
@@ -337,22 +385,51 @@ fn interactive_login(oauth_path: &Path) -> Result<String, AuthError> {
         .clone()
         .unwrap_or_else(|| "https://accounts.google.com/o/oauth2/auth".into());
     let scope = SCOPES.join(" ");
+    let state = oauth_state();
     let auth_url = format!(
-        "{auth_uri}?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent",
+        "{auth_uri}?client_id={}&redirect_uri={}&response_type=code&scope={}&state={}&access_type=offline&prompt=consent",
         urlencoding::encode(&client.client_id),
         urlencoding::encode(&redirect),
         urlencoding::encode(&scope),
+        urlencoding::encode(&state),
     );
 
     if open::that(&auth_url).is_err() {
         eprintln!("Open this URL in a browser:\n{auth_url}");
     }
 
-    let (mut stream, _) = listener.accept()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let (mut stream, _) = loop {
+        match listener.accept() {
+            Ok(conn) => break conn,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(AuthError::msg(
+                        "OAuth timed out after 5 minutes waiting for the browser callback",
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(err) => return Err(err.into()),
+        }
+    };
+    stream.set_nonblocking(false)?;
     let mut buf = [0u8; 4096];
     let n = stream.read(&mut buf)?;
     let req = String::from_utf8_lossy(&buf[..n]);
     let first_line = req.lines().next().unwrap_or("");
+    if let Some(error) = extract_query_param(first_line, "error") {
+        let desc = extract_query_param(first_line, "error_description").unwrap_or_default();
+        return Err(AuthError::msg(format!(
+            "OAuth provider returned error={error} {desc}"
+        )));
+    }
+    let returned_state = extract_query_param(first_line, "state").unwrap_or_default();
+    if returned_state != state {
+        return Err(AuthError::msg(
+            "OAuth callback state mismatch (possible CSRF). Try --login again.",
+        ));
+    }
     let code = extract_query_param(first_line, "code")
         .ok_or_else(|| AuthError::msg("OAuth callback missing code"))?;
     let body = b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<html><body><h2>Logged in</h2><p>You can close this tab and return to the terminal.</p></body></html>";
@@ -389,6 +466,14 @@ fn interactive_login(oauth_path: &Path) -> Result<String, AuthError> {
     Ok(tok.token)
 }
 
+fn oauth_state() -> String {
+    format!(
+        "{:x}-{:x}",
+        Utc::now().timestamp_nanos_opt().unwrap_or(0),
+        std::process::id()
+    )
+}
+
 fn extract_query_param(request_line: &str, key: &str) -> Option<String> {
     // GET /?code=...&scope=... HTTP/1.1
     let path = request_line.split_whitespace().nth(1)?;
@@ -402,10 +487,10 @@ fn extract_query_param(request_line: &str, key: &str) -> Option<String> {
     None
 }
 
-/// Force interactive OAuth login and cache token.json. Returns account hint.
+/// Force interactive OAuth login and cache token.json, or validate a service account.
+/// Returns a short user-facing success message.
 pub fn login() -> Result<String, AuthError> {
-    if service_account_path().is_some() {
-        let sa = service_account_path().unwrap();
+    if let Some(sa) = service_account_path() {
         let text = std::fs::read_to_string(&sa)?;
         let v: serde_json::Value = serde_json::from_str(&text)?;
         let email = v
@@ -413,7 +498,9 @@ pub fn login() -> Result<String, AuthError> {
             .and_then(|x| x.as_str())
             .unwrap_or("service_account");
         let _ = get_access_token(false)?;
-        return Ok(email.to_string());
+        return Ok(format!(
+            "Service account ready ({email}). No token.json needed."
+        ));
     }
     let path = token_path();
     if path.exists() {
@@ -425,13 +512,17 @@ pub fn login() -> Result<String, AuthError> {
         ));
     };
     let _ = interactive_login(&oauth_path)?;
-    if let Ok(tok) = load_authorized_user(&token_path()) {
-        if let Some(account) = tok.account.filter(|s| !s.is_empty()) {
-            return Ok(account);
-        }
-        return Ok(tok.client_id);
-    }
-    Ok(auth_status().to_string())
+    let hint = if let Ok(tok) = load_authorized_user(&token_path()) {
+        tok.account
+            .filter(|s| !s.is_empty())
+            .unwrap_or(tok.client_id)
+    } else {
+        auth_status().to_string()
+    };
+    Ok(format!(
+        "Logged in ({hint}). token.json saved at {}.",
+        token_path().display()
+    ))
 }
 
 #[cfg(test)]
@@ -445,5 +536,26 @@ mod tests {
             extract_query_param(line, "code").as_deref(),
             Some("abc/def")
         );
+    }
+
+    #[test]
+    fn extract_state_and_error() {
+        let line = "GET /?error=access_denied&state=abc HTTP/1.1";
+        assert_eq!(
+            extract_query_param(line, "error").as_deref(),
+            Some("access_denied")
+        );
+        assert_eq!(extract_query_param(line, "state").as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn awards_root_env_wins() {
+        let prev = std::env::var_os("AWARDS_ROOT");
+        std::env::set_var("AWARDS_ROOT", "/tmp/awards-tui-root-test");
+        assert_eq!(project_root(), PathBuf::from("/tmp/awards-tui-root-test"));
+        match prev {
+            Some(v) => std::env::set_var("AWARDS_ROOT", v),
+            None => std::env::remove_var("AWARDS_ROOT"),
+        }
     }
 }

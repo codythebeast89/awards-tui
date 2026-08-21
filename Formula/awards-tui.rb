@@ -4,13 +4,9 @@ class AwardsTui < Formula
   license "MIT"
   head "https://github.com/codythebeast89/awards-tui.git", branch: "master"
 
-  # Stable bottles land after tagging v2.1.0+ with matching source tarball sha256.
-  # Until then, install with: brew install --HEAD codythebeast89/awards-tui/awards-tui
-  #
-  # stable do
-  #   url "https://github.com/codythebeast89/awards-tui/archive/refs/tags/v2.1.0.tar.gz"
-  #   sha256 "REPLACE_AFTER_TAG"
-  # end
+  # Stable URL/sha256 filled after v2.1.0 tag is published.
+  # url "https://github.com/codythebeast89/awards-tui/archive/refs/tags/v2.1.0.tar.gz"
+  # sha256 "…"
 
   depends_on "rust" => :build
 

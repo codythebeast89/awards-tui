@@ -83,6 +83,9 @@ fn render_top(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme) {
             ),
         top[1],
     );
+    if app.focus == FocusArea::Username && app.modal.is_none() {
+        place_cursor(frame, top[1], app.username.visual_cursor());
+    }
 
     frame.render_widget(
         Paragraph::new("Enter=Lookup")
@@ -313,6 +316,7 @@ fn render_add_modal(
                     ),
                 chunks[0],
             );
+            place_cursor(frame, chunks[0], add.filter.visual_cursor());
 
             let items = if add.filtered.is_empty() {
                 vec![ListItem::new(Span::styled(
@@ -371,6 +375,7 @@ fn render_add_modal(
                     ),
                 chunks[1],
             );
+            place_cursor(frame, chunks[1], add.suffix.visual_cursor());
             frame.render_widget(
                 Paragraph::new("Enter add · Esc cancel")
                     .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
@@ -429,6 +434,7 @@ fn render_edit_modal(
             ),
         chunks[2],
     );
+    place_cursor(frame, chunks[2], edit.input.visual_cursor());
     frame.render_widget(
         Paragraph::new(
             "Format: Username, Username x2, or Username - detail · Enter save · Esc cancel",
@@ -498,6 +504,7 @@ fn render_delete_modal(
             ),
         chunks[2],
     );
+    place_cursor(frame, chunks[2], delete.input.visual_cursor());
     frame.render_widget(
         Paragraph::new("Enter delete · Esc cancel")
             .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
@@ -599,6 +606,16 @@ fn empty_dash(value: &str) -> String {
     } else {
         value.to_string()
     }
+}
+
+fn place_cursor(frame: &mut Frame<'_>, area: Rect, visual_cursor: usize) {
+    if area.width < 3 || area.height < 3 {
+        return;
+    }
+    let max_x = area.width.saturating_sub(2);
+    let x = area.x + 1 + (visual_cursor as u16).min(max_x.saturating_sub(1));
+    let y = area.y + 1;
+    frame.set_cursor_position((x, y));
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {

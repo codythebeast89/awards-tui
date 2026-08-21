@@ -10,6 +10,7 @@ awards-core = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 csv = { workspace = true }
+dirs = { workspace = true }
 jsonwebtoken = { workspace = true }
 open = { workspace = true }
 reqwest = { workspace = true }

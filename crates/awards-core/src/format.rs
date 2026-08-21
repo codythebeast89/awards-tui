@@ -9,11 +9,15 @@ fn badge_abbrev_special(key: &str) -> Option<&'static str> {
 }
 
 pub fn ordinal_award(n: i32) -> String {
-    match n {
-        2 => "2nd Award".to_string(),
-        3 => "3rd Award".to_string(),
-        _ => format!("{n}th Award"),
-    }
+    let abs = n.unsigned_abs();
+    let suffix = match (abs % 100, abs % 10) {
+        (11..=13, _) => "th",
+        (_, 1) => "st",
+        (_, 2) => "nd",
+        (_, 3) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix} Award")
 }
 
 pub fn format_ribbon_award(base_name: &str, cell: &str) -> String {
@@ -163,4 +167,23 @@ pub fn format_award_name(category: &str, base_name: Option<&str>, cell: &str) ->
     } else {
         format_ribbon_award(base, cell)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ordinal_award;
+
+    #[test]
+    fn ordinal_suffixes() {
+        assert_eq!(ordinal_award(1), "1st Award");
+        assert_eq!(ordinal_award(2), "2nd Award");
+        assert_eq!(ordinal_award(3), "3rd Award");
+        assert_eq!(ordinal_award(4), "4th Award");
+        assert_eq!(ordinal_award(11), "11th Award");
+        assert_eq!(ordinal_award(12), "12th Award");
+        assert_eq!(ordinal_award(13), "13th Award");
+        assert_eq!(ordinal_award(21), "21st Award");
+        assert_eq!(ordinal_award(22), "22nd Award");
+        assert_eq!(ordinal_award(23), "23rd Award");
+    }
 }

@@ -4,7 +4,7 @@ use awards_core::{
 };
 use awards_sheets::{
     add_award_to_user, auth_status, build_awards_data, credentials_path, login, project_root,
-    service_account_path, token_path,
+    remove_award, service_account_path, token_path, update_award_cell,
 };
 use chrono::Utc;
 use clap::Parser;
@@ -44,6 +44,18 @@ struct Cli {
 
     #[arg(long, value_name = "AWARD")]
     add: Option<String>,
+
+    /// Edit an existing award cell for USERNAME (match by award name).
+    #[arg(long, value_name = "AWARD")]
+    edit: Option<String>,
+
+    /// New cell value when using --edit (e.g. "User x2").
+    #[arg(long, value_name = "CELL")]
+    cell: Option<String>,
+
+    /// Delete an existing award for USERNAME (match by award name).
+    #[arg(long, value_name = "AWARD")]
+    delete: Option<String>,
 
     /// Optional cell suffix when using --add (e.g. x2).
     #[arg(long, default_value = "")]
@@ -119,10 +131,10 @@ fn cmd_audit(out_path: Option<PathBuf>) -> anyhow::Result<ExitCode> {
 }
 
 fn cmd_login() -> ExitCode {
-    println!("Starting Google OAuth login (browser will open)…");
+    println!("Starting Google login…");
     match login() {
-        Ok(hint) => {
-            println!("Logged in ({hint}). token.json saved — you can use add/edit/delete.");
+        Ok(message) => {
+            println!("{message}");
             ExitCode::SUCCESS
         }
         Err(err) => {
@@ -135,6 +147,7 @@ fn cmd_login() -> ExitCode {
 fn cmd_auth_status() -> ExitCode {
     let status = auth_status();
     println!("status: {status}");
+    println!("data root: {}", project_root().display());
     println!(
         "oauth client: {}",
         credentials_path()
@@ -194,6 +207,72 @@ fn cmd_add(username: &str, award_query: &str, suffix: &str) -> anyhow::Result<Ex
     })
 }
 
+fn find_user_award<'a>(
+    awards: &'a [awards_core::Award],
+    award_query: &str,
+) -> Result<&'a awards_core::Award, ExitCode> {
+    let q = award_query.to_ascii_lowercase();
+    let matches: Vec<_> = awards
+        .iter()
+        .filter(|a| {
+            a.name.to_ascii_lowercase().contains(&q)
+                || a.base_name.to_ascii_lowercase().contains(&q)
+        })
+        .collect();
+    if matches.is_empty() {
+        eprintln!("No owned award matched {award_query:?}");
+        return Err(ExitCode::from(1));
+    }
+    if matches.len() > 1 {
+        eprintln!("Ambiguous ({} matches). Be more specific:", matches.len());
+        for a in matches.iter().take(20) {
+            eprintln!(
+                "  {} · {}{} · {:?}",
+                a.name,
+                a.col,
+                a.row,
+                a.cell
+            );
+        }
+        return Err(ExitCode::from(1));
+    }
+    Ok(matches[0])
+}
+
+fn cmd_edit(username: &str, award_query: &str, new_cell: &str) -> anyhow::Result<ExitCode> {
+    eprintln!("Syncing awards…");
+    let data = build_awards_data(None)?;
+    let awards = get_awards_for_username(&data.index, username);
+    let award = match find_user_award(&awards, award_query) {
+        Ok(a) => a.clone(),
+        Err(code) => return Ok(code),
+    };
+    let result = update_award_cell(&award, new_cell, false);
+    println!("{}", result.message);
+    Ok(if result.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+fn cmd_delete(username: &str, award_query: &str) -> anyhow::Result<ExitCode> {
+    eprintln!("Syncing awards…");
+    let data = build_awards_data(None)?;
+    let awards = get_awards_for_username(&data.index, username);
+    let award = match find_user_award(&awards, award_query) {
+        Ok(a) => a.clone(),
+        Err(code) => return Ok(code),
+    };
+    let result = remove_award(&award, false);
+    println!("{}", result.message);
+    Ok(if result.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -218,6 +297,36 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         };
         return match cmd_add(username, award, &cli.suffix) {
+            Ok(code) => code,
+            Err(err) => {
+                eprintln!("{err:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if let Some(award) = cli.edit.as_deref() {
+        let Some(username) = cli.username.as_deref() else {
+            eprintln!("username is required with --edit");
+            return ExitCode::from(2);
+        };
+        let Some(cell) = cli.cell.as_deref() else {
+            eprintln!("--cell is required with --edit");
+            return ExitCode::from(2);
+        };
+        return match cmd_edit(username, award, cell) {
+            Ok(code) => code,
+            Err(err) => {
+                eprintln!("{err:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if let Some(award) = cli.delete.as_deref() {
+        let Some(username) = cli.username.as_deref() else {
+            eprintln!("username is required with --delete");
+            return ExitCode::from(2);
+        };
+        return match cmd_delete(username, award) {
             Ok(code) => code,
             Err(err) => {
                 eprintln!("{err:#}");
