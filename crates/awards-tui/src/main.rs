@@ -2,7 +2,10 @@ use awards_core::{
     collect_sheet_audit, format_audit_report, get_awards_for_username, group_awards,
     CATEGORY_LABELS,
 };
-use awards_sheets::build_awards_data;
+use awards_sheets::{
+    add_award_to_user, auth_status, build_awards_data, credentials_path, login, project_root,
+    service_account_path, token_path,
+};
 use chrono::Utc;
 use clap::Parser;
 use std::path::PathBuf;
@@ -42,15 +45,6 @@ struct Cli {
     /// Optional cell suffix when using --add (e.g. x2).
     #[arg(long, default_value = "")]
     suffix: String,
-}
-
-fn project_root() -> PathBuf {
-    // Prefer cwd (repo root when developing); fall back to crate → workspace root.
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    if cwd.join("award_columns.json").is_file() {
-        return cwd;
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 fn print_awards(username: &str) -> anyhow::Result<ExitCode> {
@@ -119,23 +113,106 @@ fn cmd_audit(out_path: Option<PathBuf>) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn cmd_login() -> ExitCode {
+    println!("Starting Google OAuth login (browser will open)…");
+    match login() {
+        Ok(hint) => {
+            println!("Logged in ({hint}). token.json saved — you can use add/edit/delete.");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("Login failed: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_auth_status() -> ExitCode {
+    let status = auth_status();
+    println!("status: {status}");
+    println!(
+        "oauth client: {}",
+        credentials_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(none)".into())
+    );
+    println!(
+        "service account: {}",
+        service_account_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(none)".into())
+    );
+    let tok = token_path();
+    println!(
+        "token: {}",
+        if tok.is_file() {
+            tok.display().to_string()
+        } else {
+            "(none)".into()
+        }
+    );
+    ExitCode::SUCCESS
+}
+
+fn cmd_add(username: &str, award_query: &str, suffix: &str) -> anyhow::Result<ExitCode> {
+    eprintln!("Syncing catalog…");
+    let data = build_awards_data(None)?;
+    let q = award_query.to_ascii_lowercase();
+    let matches: Vec<_> = data
+        .catalog
+        .iter()
+        .filter(|d| d.base_name.to_ascii_lowercase().contains(&q))
+        .collect();
+    if matches.is_empty() {
+        eprintln!("No award matched {award_query:?}");
+        return Ok(ExitCode::from(1));
+    }
+    if matches.len() > 1 {
+        eprintln!("Ambiguous ({} matches). Be more specific:", matches.len());
+        for d in matches.iter().take(20) {
+            let label = CATEGORY_LABELS
+                .iter()
+                .find(|(cat, _)| *cat == d.category)
+                .map(|(_, l)| *l)
+                .unwrap_or(d.category.as_str());
+            eprintln!("  [{label}] {}", d.base_name);
+        }
+        return Ok(ExitCode::from(1));
+    }
+    let award_def = matches[0];
+    let result = add_award_to_user(username, award_def, suffix, false);
+    println!("{}", result.message);
+    Ok(if result.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
     if cli.login {
-        eprintln!("--login not implemented yet (M3). Use `python3 main.py --login`.");
-        return ExitCode::from(2);
+        return cmd_login();
     }
     if cli.auth_status {
-        eprintln!("--auth-status not implemented yet (M3). Use `python3 main.py --auth-status`.");
-        return ExitCode::from(2);
-    }
-    if cli.add.is_some() {
-        eprintln!("--add not implemented yet (M3). Use `python3 main.py … --add …`.");
-        return ExitCode::from(2);
+        return cmd_auth_status();
     }
     if cli.audit || cli.audit_out.is_some() {
         return match cmd_audit(cli.audit_out) {
+            Ok(code) => code,
+            Err(err) => {
+                eprintln!("{err:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if let Some(award) = cli.add.as_deref() {
+        let Some(username) = cli.username.as_deref() else {
+            eprintln!("username is required with --add");
+            return ExitCode::from(2);
+        };
+        return match cmd_add(username, award, &cli.suffix) {
             Ok(code) => code,
             Err(err) => {
                 eprintln!("{err:#}");
@@ -158,6 +235,6 @@ fn main() -> ExitCode {
     }
 
     eprintln!("TUI not implemented yet (M4). Use `python3 main.py` for the Textual UI.");
-    eprintln!("Or: cargo run -p awards-tui -- <username>   /   --audit");
+    eprintln!("Or: cargo run -p awards-tui -- <username> / --audit / --auth-status / --add …");
     ExitCode::from(2)
 }

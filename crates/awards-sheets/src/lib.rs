@@ -1,16 +1,27 @@
-//! Google Sheets CSV fetch and index build.
-//!
-//! Write/auth paths land in M3. Pure cell helpers live in `awards-core`.
+//! Google Sheets CSV fetch, OAuth, and write helpers.
+
+mod api;
+mod auth;
+mod edit;
 
 use awards_core::{
     add_award, clean_cell, col_to_index, csv_index_to_sheet_row, format_award_name, load_columns,
-    normalize_username, sheet_meta, Award, AwardColumn, AwardDef, AwardsData, SHEET_ID,
-    SHEET_NAMES, USER_AGENT,
+    normalize_username, sheet_meta, Award, AwardColumn, AwardDef, AwardsData, SHEET_ID, SHEET_NAMES,
+    USER_AGENT,
 };
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
+pub use api::{a1, SheetsApi};
+pub use auth::{
+    auth_status, credentials_path, get_access_token, login, project_root, service_account_path,
+    token_path, AuthError,
+};
 pub use awards_core::{build_cell_value, find_first_empty_row};
+pub use edit::{
+    add_award_to_user, award_with_live_row, find_live_row, remove_award, update_award_cell,
+    EditResult,
+};
 
 #[derive(Debug, Error)]
 pub enum SheetsError {
@@ -40,10 +51,7 @@ pub fn parse_csv(text: &str) -> std::result::Result<Vec<Vec<String>>, csv::Error
 
 /// Fetch one tab via the public Google Sheets CSV export (no auth).
 pub fn fetch_sheet(sheet_name: &str) -> Result<Vec<Vec<String>>> {
-    let query = format!(
-        "tqx=out:csv&sheet={}",
-        urlencoding::encode(sheet_name)
-    );
+    let query = format!("tqx=out:csv&sheet={}", urlencoding::encode(sheet_name));
     let url = format!("https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?{query}");
     let client = reqwest::blocking::Client::builder()
         .user_agent(USER_AGENT)
@@ -187,7 +195,6 @@ mod tests {
         assert_eq!(data.catalog.len(), 1);
         assert_eq!(data.index["alice"].len(), 1);
         assert_eq!(data.index["bob"][0].name, "Army Parachutist Badge (Senior)");
-        // Badges offset +6: csv index 3 → sheet row 10
         assert_eq!(data.index["alice"][0].row, 10);
     }
 }

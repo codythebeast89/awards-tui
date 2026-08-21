@@ -3,13 +3,18 @@ name = "awards-sheets"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Google Sheets CSV fetch and write helpers"
+description = "Google Sheets CSV fetch, OAuth, and write helpers"
 
 [dependencies]
 awards-core = { workspace = true }
 anyhow = { workspace = true }
+chrono = { workspace = true }
 csv = { workspace = true }
+jsonwebtoken = { workspace = true }
+open = { workspace = true }
 reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 urlencoding = { workspace = true }
 
