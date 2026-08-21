@@ -36,10 +36,9 @@ This repo includes `Formula/awards-tui.rb` so the GitHub repo can be used as a t
 
 ```bash
 brew tap codythebeast89/awards-tui https://github.com/codythebeast89/awards-tui
-brew install --HEAD codythebeast89/awards-tui/awards-tui
+brew install codythebeast89/awards-tui/awards-tui
+# or: brew install --HEAD codythebeast89/awards-tui/awards-tui
 ```
-
-(`--HEAD` builds from `master` until a versioned bottle/source tarball is published.)
 
 ## Setup (write access)
 
