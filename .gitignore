@@ -14,3 +14,7 @@ service-account.json
 *.pem
 audits/
 audit-*.txt
+
+# Rust
+/target/
+**/*.rs.bk

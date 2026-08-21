@@ -1,0 +1,11 @@
+[package]
+name = "awards-sheets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Google Sheets CSV fetch and write helpers (stub until M2/M3)"
+
+[dependencies]
+awards-core = { workspace = true }
+
+[dev-dependencies]

@@ -1,0 +1,16 @@
+[package]
+name = "awards-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI and TUI for the FORSCOM Decorations Database"
+
+[[bin]]
+name = "awards-tui"
+path = "src/main.rs"
+
+[dependencies]
+awards-core = { workspace = true }
+awards-sheets = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }

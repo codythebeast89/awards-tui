@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/awards-core",
+    "crates/awards-sheets",
+    "crates/awards-tui",
+]
+default-members = ["crates/awards-tui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/codythebeast89/awards-tui"
+
+[workspace.dependencies]
+awards-core = { path = "crates/awards-core" }
+awards-sheets = { path = "crates/awards-sheets" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+strsim = "0.11"
