@@ -9,6 +9,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap},
     Frame,
 };
+use tui_input::Input;
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let theme = app.config.theme.clone();
@@ -72,20 +73,17 @@ fn render_top(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme) {
     } else {
         theme.border
     };
-    frame.render_widget(
-        Paragraph::new(app.username.value())
-            .style(input_style)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(input_border)
-                    .title(" username "),
-            ),
+    render_text_input(
+        frame,
         top[1],
+        &app.username,
+        input_style,
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(input_border)
+            .title(" username "),
+        app.focus == FocusArea::Username && app.modal.is_none(),
     );
-    if app.focus == FocusArea::Username && app.modal.is_none() {
-        place_cursor(frame, top[1], app.username.visual_cursor());
-    }
 
     frame.render_widget(
         Paragraph::new("Enter=Lookup")
@@ -305,18 +303,17 @@ fn render_add_modal(
                     Constraint::Length(1),
                 ])
                 .split(inner);
-            frame.render_widget(
-                Paragraph::new(add.filter.value())
-                    .style(Style::default().fg(theme.text).bg(theme.input_bg))
-                    .block(
-                        Block::default()
-                            .title(" filter ")
-                            .borders(Borders::ALL)
-                            .border_style(theme.purple),
-                    ),
+            render_text_input(
+                frame,
                 chunks[0],
+                &add.filter,
+                Style::default().fg(theme.text).bg(theme.input_bg),
+                Block::default()
+                    .title(" filter ")
+                    .borders(Borders::ALL)
+                    .border_style(theme.purple),
+                true,
             );
-            place_cursor(frame, chunks[0], add.filter.visual_cursor());
 
             let items = if add.filtered.is_empty() {
                 vec![ListItem::new(Span::styled(
@@ -364,18 +361,17 @@ fn render_add_modal(
                     .style(Style::default().fg(theme.purple).bg(theme.panel_alt)),
                 chunks[0],
             );
-            frame.render_widget(
-                Paragraph::new(add.suffix.value())
-                    .style(Style::default().fg(theme.text).bg(theme.input_bg))
-                    .block(
-                        Block::default()
-                            .title(" suffix ")
-                            .borders(Borders::ALL)
-                            .border_style(theme.purple),
-                    ),
+            render_text_input(
+                frame,
                 chunks[1],
+                &add.suffix,
+                Style::default().fg(theme.text).bg(theme.input_bg),
+                Block::default()
+                    .title(" suffix ")
+                    .borders(Borders::ALL)
+                    .border_style(theme.purple),
+                true,
             );
-            place_cursor(frame, chunks[1], add.suffix.visual_cursor());
             frame.render_widget(
                 Paragraph::new("Enter add · Esc cancel")
                     .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
@@ -423,18 +419,17 @@ fn render_edit_modal(
             .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
         chunks[1],
     );
-    frame.render_widget(
-        Paragraph::new(edit.input.value())
-            .style(Style::default().fg(theme.text).bg(theme.input_bg))
-            .block(
-                Block::default()
-                    .title(" cell ")
-                    .borders(Borders::ALL)
-                    .border_style(theme.purple),
-            ),
+    render_text_input(
+        frame,
         chunks[2],
+        &edit.input,
+        Style::default().fg(theme.text).bg(theme.input_bg),
+        Block::default()
+            .title(" cell ")
+            .borders(Borders::ALL)
+            .border_style(theme.purple),
+        true,
     );
-    place_cursor(frame, chunks[2], edit.input.visual_cursor());
     frame.render_widget(
         Paragraph::new(
             "Format: Username, Username x2, or Username - detail · Enter save · Esc cancel",
@@ -493,18 +488,17 @@ fn render_delete_modal(
             .style(Style::default().fg(theme.text).bg(theme.panel_alt)),
         chunks[1],
     );
-    frame.render_widget(
-        Paragraph::new(delete.input.value())
-            .style(Style::default().fg(theme.text).bg(theme.input_bg))
-            .block(
-                Block::default()
-                    .title(" confirm ")
-                    .borders(Borders::ALL)
-                    .border_style(theme.dup),
-            ),
+    render_text_input(
+        frame,
         chunks[2],
+        &delete.input,
+        Style::default().fg(theme.text).bg(theme.input_bg),
+        Block::default()
+            .title(" confirm ")
+            .borders(Borders::ALL)
+            .border_style(theme.dup),
+        true,
     );
-    place_cursor(frame, chunks[2], delete.input.visual_cursor());
     frame.render_widget(
         Paragraph::new("Enter delete · Esc cancel")
             .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
@@ -608,14 +602,31 @@ fn empty_dash(value: &str) -> String {
     }
 }
 
-fn place_cursor(frame: &mut Frame<'_>, area: Rect, visual_cursor: usize) {
-    if area.width < 3 || area.height < 3 {
-        return;
+/// Render a bordered `tui_input::Input` with horizontal scroll and a visible caret.
+///
+/// Ratatui hides the terminal cursor unless `set_cursor_position` is called after draw.
+fn render_text_input(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    input: &Input,
+    style: Style,
+    block: Block<'_>,
+    show_cursor: bool,
+) {
+    // Keep 2 columns for borders and 1 so the caret can sit past the last char.
+    let width = area.width.max(3).saturating_sub(3) as usize;
+    let scroll = input.visual_scroll(width);
+    frame.render_widget(
+        Paragraph::new(input.value())
+            .style(style)
+            .scroll((0, scroll as u16))
+            .block(block),
+        area,
+    );
+    if show_cursor && area.width >= 3 && area.height >= 3 {
+        let x = input.visual_cursor().max(scroll) - scroll + 1;
+        frame.set_cursor_position((area.x + x as u16, area.y + 1));
     }
-    let max_x = area.width.saturating_sub(2);
-    let x = area.x + 1 + (visual_cursor as u16).min(max_x.saturating_sub(1));
-    let y = area.y + 1;
-    frame.set_cursor_position((x, y));
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {

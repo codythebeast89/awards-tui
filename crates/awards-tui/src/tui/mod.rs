@@ -3,7 +3,7 @@ mod ui;
 
 use app::{App, WorkerMsg};
 use crossterm::{
-    cursor::Show,
+    cursor::{SetCursorStyle, Show},
     event::{self, Event},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -25,7 +25,11 @@ impl TerminalSession {
     fn new() -> anyhow::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if let Err(err) = execute!(stdout, EnterAlternateScreen) {
+        if let Err(err) = execute!(
+            stdout,
+            EnterAlternateScreen,
+            SetCursorStyle::BlinkingBar
+        ) {
             let _ = disable_raw_mode();
             return Err(err.into());
         }
@@ -51,7 +55,12 @@ impl TerminalSession {
         }
         self.restored = true;
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen, Show);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            LeaveAlternateScreen,
+            SetCursorStyle::DefaultUserShape,
+            Show
+        );
     }
 }
 
