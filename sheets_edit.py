@@ -13,6 +13,7 @@ from awards import (
     col_to_index,
     csv_index_to_sheet_row,
     format_award_name,
+    match_row_in_window,
     normalize_username,
     sheet_data_start_row,
 )
@@ -94,11 +95,7 @@ def add_award_to_user(
         return EditResult(False, "Username required")
 
     key = normalize_username(user)
-    if rows is not None:
-        existing = find_user_cell(rows, award_def.sheet, award_def.col, user)
-        if existing:
-            return EditResult(False, f"@{user} already has {award_def.base_name} (row {existing})")
-
+    _ = rows  # cache is not trusted; live column GET is authoritative
     cell_value = build_cell_value(user, suffix)
     try:
         service = build_sheets_service(interactive=interactive_auth)
@@ -154,6 +151,48 @@ def add_award_to_user(
     return EditResult(True, f"Added {display} for @{user} at {award_def.col}{target_row}", award)
 
 
+def _live_cell_value(api, sheet: str, col: str, row: int) -> str:
+    result = api.get(spreadsheetId=SHEET_ID, range=_a1(sheet, col, row)).execute()
+    vals = result.get("values") or []
+    if not vals or not vals[0]:
+        return ""
+    return clean_cell(str(vals[0][0] if vals[0] else ""))
+
+
+def find_live_row(award: Award, api, *, window: int = 24) -> int | None:
+    """Find the live sheet row for this cell near the CSV-computed address."""
+    if not award.sheet or not award.col or not award.row:
+        return None
+    start = max(sheet_data_start_row(award.sheet), award.row - window)
+    end = max(start, award.row + window)
+    rng = f"'{award.sheet}'!{award.col}{start}:{award.col}{end}"
+    fetched = api.get(spreadsheetId=SHEET_ID, range=rng).execute()
+    values = fetched.get("values") or []
+    return match_row_in_window(values, start, award.cell, award.row)
+
+
+def award_with_live_row(award: Award, api, *, window: int = 24) -> Award:
+    live_row = find_live_row(award, api, window=window)
+    if live_row is None or live_row == award.row:
+        return award
+    return Award(
+        category=award.category,
+        name=award.name,
+        sheet=award.sheet,
+        col=award.col,
+        row=live_row,
+        cell=award.cell,
+        base_name=award.base_name,
+    )
+
+
+def _cell_stale_message(award: Award, live: str) -> str:
+    return (
+        f"{award.col}{award.row} changed on the sheet "
+        f"(now {live!r}; expected {award.cell!r}). Refresh and try again."
+    )
+
+
 def update_award_cell(
     award: Award,
     new_cell: str,
@@ -170,8 +209,22 @@ def update_award_cell(
 
     try:
         service = build_sheets_service(interactive=interactive_auth)
+        api = _values_api(service)
+        live_row = find_live_row(award, api)
+        if live_row is None:
+            live = _live_cell_value(api, award.sheet, award.col, award.row)
+            return EditResult(False, _cell_stale_message(award, live))
+        award = Award(
+            category=award.category,
+            name=award.name,
+            sheet=award.sheet,
+            col=award.col,
+            row=live_row,
+            cell=award.cell,
+            base_name=award.base_name,
+        )
         a1 = _a1(award.sheet, award.col, award.row)
-        _values_api(service).update(
+        api.update(
             spreadsheetId=SHEET_ID,
             range=a1,
             valueInputOption="USER_ENTERED",
@@ -206,10 +259,26 @@ def remove_award(
     try:
         service = build_sheets_service(interactive=interactive_auth)
         api = _values_api(service)
+        live_row = find_live_row(award, api)
+        if live_row is None:
+            live = _live_cell_value(api, award.sheet, award.col, award.row)
+            return EditResult(False, _cell_stale_message(award, live))
+        award = Award(
+            category=award.category,
+            name=award.name,
+            sheet=award.sheet,
+            col=award.col,
+            row=live_row,
+            cell=award.cell,
+            base_name=award.base_name,
+        )
         # Read from the deleted row through the end of the column.
         tail_range = f"'{award.sheet}'!{award.col}{award.row}:{award.col}"
         fetched = api.get(spreadsheetId=SHEET_ID, range=tail_range).execute()
         col_vals = fetched.get("values") or []
+        live = clean_cell(str(col_vals[0][0]) if col_vals and col_vals[0] else "")
+        if live != clean_cell(award.cell):
+            return EditResult(False, _cell_stale_message(award, live))
         # Drop the first cell (the deleted entry); keep the rest.
         remaining = [(row[0] if row else "") for row in col_vals[1:]]
         # Rewrite from the deleted row: shifted values + one blank to clear the old last cell.
@@ -241,6 +310,7 @@ __all__ = [
     "add_award_to_user",
     "build_cell_value",
     "find_first_empty_row",
+    "find_live_row",
     "find_user_cell",
     "remove_award",
     "update_award_cell",

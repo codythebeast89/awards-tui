@@ -61,13 +61,14 @@ from awards import (
     format_audit_report,
     get_awards_for_username,
     normalize_username,
+    owned_award_columns,
     reindex_column_after_delete,
     row_offset,
     shift_column_up_in_rows,
     upsert_award_in_index,
 )
-from sheets_auth import auth_status
-from sheets_edit import add_award_to_user, remove_award, update_award_cell
+from sheets_auth import auth_status, build_sheets_service
+from sheets_edit import add_award_to_user, award_with_live_row, remove_award, update_award_cell
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +235,7 @@ class EditAwardScreen(ModalScreen[str | None]):
         with Vertical(id="edit-dialog"):
             yield Label(f"Edit · {self.award.name}")
             yield Label(
-                f"{self.award.sheet} · {self.award.col}{self.award.row}",
+                f"{self.award.sheet} · {self.award.col}{self.award.row} · cell @{normalize_username(self.award.cell) or '?'}",
                 classes="muted",
             )
             yield Input(
@@ -275,7 +276,7 @@ class DeleteAwardScreen(ModalScreen[bool]):
         align: center middle;
     }
     #delete-dialog {
-        width: 64;
+        width: 72;
         height: auto;
         border: thick $error;
         background: $surface;
@@ -293,16 +294,28 @@ class DeleteAwardScreen(ModalScreen[bool]):
     }
     """
 
-    def __init__(self, award: Award, username: str) -> None:
+    def __init__(self, award: Award, viewed_username: str) -> None:
         super().__init__()
         self.award = award
-        self.username = username
+        self.viewed_username = viewed_username
 
     def compose(self) -> ComposeResult:
+        cell_user = normalize_username(self.award.cell) or "?"
+        viewed = normalize_username(self.viewed_username) or self.viewed_username
+        loc = f"{self.award.col}{self.award.row}" if self.award.col else f"row {self.award.row}"
         with Vertical(id="delete-dialog"):
-            yield Label(
-                f"Remove {self.award.name} (row {self.award.row}) from @{self.username}?"
-            )
+            if viewed and cell_user != viewed:
+                yield Label(
+                    f"Typo / similar name: this cell is @{cell_user}, "
+                    f"not the lookup @{viewed}."
+                )
+                yield Label(
+                    f"Remove {self.award.name} at {loc} for @{cell_user} from the sheet?"
+                )
+            else:
+                yield Label(
+                    f"Remove {self.award.name} ({loc}) from @{cell_user}?"
+                )
             yield Label('Type "delete" to confirm')
             yield Input(placeholder="delete", id="delete-confirm")
             with Horizontal(id="delete-actions"):
@@ -541,6 +554,7 @@ class AwardsApp(App[None]):
         self._visible_warn: list[bool] = []
         self._busy = False
         self._loading = False
+        self._dialog_open = False
         self._active_tab = "all"
 
     def compose(self) -> ComposeResult:
@@ -599,7 +613,7 @@ class AwardsApp(App[None]):
 
     def _begin_busy(self, status: str) -> bool:
         """Claim the write lock on the UI thread before starting a worker."""
-        if self._busy or self._loading:
+        if self._busy or self._loading or self._dialog_open:
             self.notify("Wait for the current sheet operation to finish", severity="warning")
             return False
         self._busy = True
@@ -608,6 +622,16 @@ class AwardsApp(App[None]):
 
     def _end_busy(self) -> None:
         self._busy = False
+
+    def _begin_dialog(self) -> bool:
+        if self._busy or self._loading or self._dialog_open:
+            self.notify("Wait for the current sheet operation to finish", severity="warning")
+            return False
+        self._dialog_open = True
+        return True
+
+    def _end_dialog(self) -> None:
+        self._dialog_open = False
 
     # --- data helpers --------------------------------------------------
 
@@ -703,11 +727,64 @@ class AwardsApp(App[None]):
         self.results = awards
         self.duplicates = [h.to_award() for h in dup_hits]
         self._refresh_awards_list(select=select)
+        if self.results or self.duplicates:
+            self.query_one("#awards-list", OptionList).focus()
         dup_note = f" · {len(self.duplicates)} duplicate(s)" if self.duplicates else ""
         self._set_status(
             status
             or f"{username} · {len(awards)} award(s){dup_note} · a/e/d · F5 refresh"
         )
+        self._resolve_visible_rows(
+            username,
+            list(self.results),
+            list(self.duplicates),
+            select,
+            status
+            or f"{username} · {len(awards)} award(s){dup_note} · a/e/d · F5 refresh",
+        )
+
+    @work(thread=True, exclusive=True, group="rows")
+    def _resolve_visible_rows(
+        self,
+        username: str,
+        results: list[Award],
+        duplicates: list[Award],
+        select: Award | None,
+        status: str,
+    ) -> None:
+        """CSV row numbers can lag mid-sheet; snap displayed rows to live cells."""
+        try:
+            service = build_sheets_service(interactive=False)
+            api = service.spreadsheets().values()
+        except Exception:
+            return
+        fixed_results = [award_with_live_row(a, api) for a in results]
+        fixed_dups = [award_with_live_row(a, api) for a in duplicates]
+        if fixed_results == results and fixed_dups == duplicates:
+            return
+
+        def apply() -> None:
+            if self.results_username != username:
+                return
+            self.results = fixed_results
+            self.duplicates = fixed_dups
+            if select:
+                select_fixed = next(
+                    (
+                        a
+                        for a in fixed_results + fixed_dups
+                        if a.sheet == select.sheet
+                        and a.col == select.col
+                        and a.cell == select.cell
+                    ),
+                    select,
+                )
+                self._refresh_awards_list(select=select_fixed)
+            else:
+                self._refresh_awards_list()
+            self._set_status(status)
+
+        self.call_from_thread(apply)
 
     # --- lookup / refresh / audit --------------------------------------
 
@@ -764,7 +841,7 @@ class AwardsApp(App[None]):
             self.call_from_thread(done)
 
     def action_refresh(self) -> None:
-        if self._busy or self._loading:
+        if self._busy or self._loading or self._dialog_open:
             self.notify("Wait for the current sheet operation to finish", severity="warning")
             return
         self._loading = True
@@ -865,21 +942,24 @@ class AwardsApp(App[None]):
 
     @work
     async def action_add(self) -> None:
-        if self._busy or self._loading:
-            self.notify("Wait for the current sheet operation to finish", severity="warning")
+        if not self._begin_dialog():
             return
-        if not self.results_username:
-            self.notify("Look up a user before adding awards", severity="warning")
-            return
-        if not self.data:
-            self.notify("Still loading…", severity="warning")
-            return
-        owned = {(a.sheet, a.col) for a in self.results + self.duplicates}
-        candidates = [d for d in self.data.catalog if (d.sheet, d.col) not in owned]
-        if not candidates:
-            self.notify("No remaining awards to add for this user", severity="information")
-            return
-        result = await self.push_screen_wait(AddAwardScreen(candidates))
+        result: tuple[AwardDef, str] | None = None
+        try:
+            if not self.results_username:
+                self.notify("Look up a user before adding awards", severity="warning")
+                return
+            if not self.data:
+                self.notify("Still loading…", severity="warning")
+                return
+            owned = owned_award_columns(self.results + self.duplicates, self.results_username)
+            candidates = [d for d in self.data.catalog if (d.sheet, d.col) not in owned]
+            if not candidates:
+                self.notify("No remaining awards to add for this user", severity="information")
+                return
+            result = await self.push_screen_wait(AddAwardScreen(candidates))
+        finally:
+            self._end_dialog()
         if not result:
             return
         award_def, suffix = result
@@ -887,7 +967,7 @@ class AwardsApp(App[None]):
             return
         self._commit_add(award_def, suffix)
 
-    @work(thread=True)
+    @work(thread=True, exclusive=True, group="write")
     def _commit_add(self, award_def: AwardDef, suffix: str) -> None:
         username = self.results_username or ""
         rows = self.data.sheet_rows.get(award_def.sheet) if self.data else None
@@ -926,21 +1006,25 @@ class AwardsApp(App[None]):
 
     @work
     async def action_edit(self) -> None:
-        if self._busy or self._loading:
-            self.notify("Wait for the current sheet operation to finish", severity="warning")
+        if not self._begin_dialog():
             return
-        award = self._selected_award()
-        if not award:
-            self.notify("Select an award to edit", severity="warning")
-            return
-        new_cell = await self.push_screen_wait(EditAwardScreen(award))
-        if new_cell is None:
+        award: Award | None = None
+        new_cell: str | None = None
+        try:
+            award = self._selected_award()
+            if not award:
+                self.notify("Select an award to edit", severity="warning")
+                return
+            new_cell = await self.push_screen_wait(EditAwardScreen(award))
+        finally:
+            self._end_dialog()
+        if award is None or new_cell is None:
             return
         if not self._begin_busy("Updating sheet…"):
             return
         self._commit_edit(award, new_cell)
 
-    @work(thread=True)
+    @work(thread=True, exclusive=True, group="write")
     def _commit_edit(self, award: Award, new_cell: str) -> None:
         try:
             result = update_award_cell(award, new_cell, interactive_auth=False)
@@ -981,22 +1065,26 @@ class AwardsApp(App[None]):
 
     @work
     async def action_delete(self) -> None:
-        if self._busy or self._loading:
-            self.notify("Wait for the current sheet operation to finish", severity="warning")
+        if not self._begin_dialog():
             return
-        award = self._selected_award()
-        if not award:
-            self.notify("Select an award to delete", severity="warning")
-            return
-        username = self.results_username or "?"
-        confirmed = await self.push_screen_wait(DeleteAwardScreen(award, username))
-        if not confirmed:
+        award: Award | None = None
+        confirmed = False
+        try:
+            award = self._selected_award()
+            if not award:
+                self.notify("Select an award to delete", severity="warning")
+                return
+            viewed = self.results_username or "?"
+            confirmed = bool(await self.push_screen_wait(DeleteAwardScreen(award, viewed)))
+        finally:
+            self._end_dialog()
+        if not award or not confirmed:
             return
         if not self._begin_busy(f"Removing {award.name}…"):
             return
         self._commit_delete(award)
 
-    @work(thread=True)
+    @work(thread=True, exclusive=True, group="write")
     def _commit_delete(self, award: Award) -> None:
         try:
             result = remove_award(award, interactive_auth=False)

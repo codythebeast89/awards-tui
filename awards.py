@@ -135,6 +135,30 @@ def clean_cell(cell: str | None) -> str:
     return str(cell).translate(_INVISIBLE_CHARS).strip()
 
 
+def match_row_in_window(
+    values: list[list[str]],
+    start_row: int,
+    expected_cell: str,
+    hint_row: int,
+) -> int | None:
+    """Map an API values window onto live sheet rows and find `expected_cell`.
+
+    `values[0]` is `start_row`. Blank API rows are empty lists. If several cells
+    match, pick the one closest to `hint_row` (handles mid-sheet CSV lag).
+    """
+    want = clean_cell(expected_cell)
+    if not want:
+        return None
+    hits: list[int] = []
+    for i, row in enumerate(values):
+        live = clean_cell(str(row[0]) if row else "")
+        if live == want:
+            hits.append(start_row + i)
+    if not hits:
+        return None
+    return min(hits, key=lambda r: abs(r - hint_row))
+
+
 def normalize_username(cell: str | None) -> str | None:
     text = clean_cell(cell)
     if not text:
@@ -545,7 +569,7 @@ def shift_column_up_in_rows(
     """Remove the cell at sheet_row in `col` and shift later cells in that column up."""
     csv_i = sheet_row - 1 - row_offset(sheet)
     col_idx = col_to_index(col)
-    if csv_i < 0 or not rows:
+    if csv_i < 0 or csv_i >= len(rows) or not rows:
         return
     for r in range(csv_i, len(rows) - 1):
         below = rows[r + 1][col_idx] if col_idx < len(rows[r + 1]) else ""
@@ -606,6 +630,18 @@ def awards_excluding_duplicate_rows(
     """Keep duplicate/typo rows only in the duplicates section, not the main list."""
     keys = {(h.sheet, h.col, h.row) for h in dup_hits}
     return [a for a in awards if (a.sheet, a.col, a.row) not in keys]
+
+
+def owned_award_columns(awards: list[Award], username: str) -> set[tuple[str, str]]:
+    """Columns this username actually occupies (ignore similar-name rows)."""
+    key = normalize_username(username)
+    if not key:
+        return set()
+    return {
+        (a.sheet, a.col)
+        for a in awards
+        if a.sheet and a.col and normalize_username(a.cell) == key
+    }
 
 
 def group_awards(awards: list[Award]) -> dict[str, list[str]]:

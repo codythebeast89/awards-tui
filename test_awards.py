@@ -305,6 +305,10 @@ def test_shift_column_up_on_delete() -> None:
         ["", "", "bob"],
         ["", "", "carol"],
     ]
+    snapshot = [row[:] for row in rows]
+    shift_column_up_in_rows(snapshot, "Ribbons Database", "C", 99)
+    assert snapshot[3][2] == "carol"
+
     shift_column_up_in_rows(rows, "Ribbons Database", "C", 11)  # delete bob
     assert rows[1][2] == "alice"
     assert rows[2][2] == "carol"
@@ -318,6 +322,27 @@ def test_shift_column_up_on_delete() -> None:
     assert "bob" not in index
     assert index["carol"][0].row == 11
     assert index["alice"][0].row == 10
+
+
+def test_owned_award_columns_ignores_similar_cells() -> None:
+    from awards import Award, owned_award_columns
+
+    alice = Award("ribbons", "A", sheet="Ribbons Database", col="C", row=10, cell="alice")
+    alicie = Award("ribbons", "A", sheet="Ribbons Database", col="D", row=11, cell="alicie")
+    owned = owned_award_columns([alice, alicie], "alice")
+    assert owned == {("Ribbons Database", "C")}
+
+
+def test_match_row_in_window() -> None:
+    from awards import match_row_in_window
+
+    values = [[], ["Shadow325418 - 75th CSIB"], ["NovaStorm_Commader - ASF CSIB"]]
+    assert (
+        match_row_in_window(values, 4413, "NovaStorm_Commader - ASF CSIB", 4413) == 4415
+    )
+    # Two copies: pick nearest to the CSV hint.
+    both = [["alice"], ["bob"], ["alice"]]
+    assert match_row_in_window(both, 10, "alice", 12) == 12
 
 
 if __name__ == "__main__":
@@ -339,4 +364,6 @@ if __name__ == "__main__":
     test_awards_excluding_duplicate_rows()
     test_upsert_award_moves_username()
     test_shift_column_up_on_delete()
+    test_owned_award_columns_ignores_similar_cells()
+    test_match_row_in_window()
     print("All offline tests passed.")
