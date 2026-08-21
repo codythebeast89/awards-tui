@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 pub const SHEET_ID: &str = "1e_AqHIGrGdfNSgoHt6kLV89E6LADJmlZzhfRAUXo0wY";
-pub const USER_AGENT: &str = "awards-tui/1.2 (decorations lookup + edit)";
+pub const USER_AGENT: &str = "awards-tui/2.0 (decorations lookup + edit)";
 
 pub const SHEET_NAMES: &[&str] = &[
     "Ribbons Database",

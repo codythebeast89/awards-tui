@@ -16,7 +16,7 @@ def _reexec_venv_if_needed() -> None:
         return
     except ImportError:
         pass
-    venv_python = Path(__file__).resolve().parent / ".venv" / "bin" / "python"
+    venv_python = Path(__file__).resolve().parent.parent / ".venv" / "bin" / "python"
     if not venv_python.is_file():
         return
     if Path(sys.executable).resolve() == venv_python.resolve():

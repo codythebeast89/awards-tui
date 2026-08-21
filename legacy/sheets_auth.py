@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+# Repo root — credentials stay next to award_columns.json, not under legacy/.
+ROOT = Path(__file__).resolve().parent.parent
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 CREDENTIALS_CANDIDATES = (
     ROOT / "credentials.json",
@@ -69,7 +70,7 @@ def get_credentials(*, interactive: bool = True):
         from google_auth_oauthlib.flow import InstalledAppFlow
     except ImportError as exc:
         raise AuthError(
-            "Google API packages missing. Run: pip install -r requirements.txt"
+            "Google API packages missing. Run: pip install -r legacy/requirements.txt"
         ) from exc
 
     sa_path = service_account_path()
@@ -142,7 +143,7 @@ def build_sheets_service(*, interactive: bool = True):
         from googleapiclient.discovery import build
     except ImportError as exc:
         raise AuthError(
-            "Missing googleapiclient. Activate .venv or run: pip install -r requirements.txt"
+            "Missing googleapiclient. Activate .venv or run: pip install -r legacy/requirements.txt"
         ) from exc
 
     creds = get_credentials(interactive=interactive)

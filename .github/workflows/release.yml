@@ -1,0 +1,29 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release binary
+        run: cargo build -p awards-tui --release
+      - name: Package
+        run: |
+          cp target/release/awards-tui awards-tui-linux-x86_64
+          tar -czf awards-tui-linux-x86_64.tar.gz awards-tui-linux-x86_64
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: awards-tui-linux-x86_64.tar.gz
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 SHEET_ID = "1e_AqHIGrGdfNSgoHt6kLV89E6LADJmlZzhfRAUXo0wY"
-USER_AGENT = "awards-tui/1.2 (decorations lookup + edit)"
+USER_AGENT = "awards-tui/2.0-legacy (decorations lookup + edit)"
 
 SHEET_META = {
     # Public CSV: row 1 = award titles, row 2+ = entries.
@@ -35,7 +35,8 @@ BADGE_ABBREV_SPECIAL = {
     "ESB": "Expert Soldier Badge",
 }
 
-ROOT = Path(__file__).resolve().parent
+# Repo root (award_columns.json, credentials, audits/) — this package lives in legacy/.
+ROOT = Path(__file__).resolve().parent.parent
 COLUMNS_PATH = ROOT / "award_columns.json"
 
 
