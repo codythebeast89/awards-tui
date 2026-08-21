@@ -8,6 +8,8 @@ Tabs used: **Badges Database**, **Ribbons Database**, **Foreign Awards Database*
 
 ## Install
 
+### From source
+
 Requires a recent [Rust toolchain](https://rustup.rs/).
 
 ```bash
@@ -16,11 +18,28 @@ cd awards-tui
 cargo install --path crates/awards-tui
 ```
 
-Or run without installing:
+Or run without installing: `cargo run -p awards-tui --release`
+
+### cargo-binstall
+
+After a `v*` GitHub release (Linux/macOS assets):
 
 ```bash
-cargo run -p awards-tui --release
+cargo binstall --git https://github.com/codythebeast89/awards-tui awards-tui
 ```
+
+Release tarballs are named `awards-tui-<rust-target>.tar.gz` (see `[package.metadata.binstall]`).
+
+### Homebrew (tap)
+
+This repo includes `Formula/awards-tui.rb` so the GitHub repo can be used as a tap:
+
+```bash
+brew tap codythebeast89/awards-tui https://github.com/codythebeast89/awards-tui
+brew install --HEAD codythebeast89/awards-tui/awards-tui
+```
+
+(`--HEAD` builds from `master` until a versioned bottle/source tarball is published.)
 
 ## Setup (write access)
 
@@ -59,9 +78,26 @@ Purple dark layout: username bar, fixed **Actions** pane, tabbed **Awards** list
 | F5 / Ctrl+R | Refresh sheet data |
 | Tab | Cycle focus |
 | Ctrl+Q | Quit |
-| Esc | Cancel modal |
+| Esc | Cancel modal / close audit browser |
+
+Actions → **Audit** opens an in-app report browser (also writes `audits/audit-*.txt`). In the browser: ↑/↓ or j/k, PgUp/PgDn, Home/End, Esc.
 
 Award tabs: All / Badges / Ribbons / Foreign / Duplicates/Typos. Duplicates and typos appear in **red** on **All**.
+
+### Theme / config
+
+Optional TOML (see `awards-tui.example.toml`). First match wins:
+
+1. `AWARDS_TUI_CONFIG`
+2. `./awards-tui.toml`
+3. `~/.config/awards-tui/config.toml`
+
+```toml
+[theme]
+bg = "#0c0c0f"
+purple = "#a78bfa"
+dup = "#f87171"
+```
 
 ### CLI
 

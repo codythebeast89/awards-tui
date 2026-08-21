@@ -1,0 +1,19 @@
+# Example awards-tui config.
+# Copy to one of:
+#   ./awards-tui.toml
+#   ~/.config/awards-tui/config.toml
+# Or set AWARDS_TUI_CONFIG=/path/to/file.toml
+
+[theme]
+# Hex colors (#RRGGBB). Omit keys to keep defaults (Posting-like purple dark).
+bg = "#0c0c0f"
+panel = "#101018"
+panel_alt = "#12121a"
+purple = "#a78bfa"
+purple_dark = "#7c3aed"
+border = "#3b3358"
+text = "#f5f3ff"
+muted = "#9ca3af"
+dup = "#f87171"
+input_bg = "#1e1b4b"
+highlight_bg = "#312e81"

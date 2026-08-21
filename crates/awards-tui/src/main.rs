@@ -11,6 +11,7 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+mod config;
 mod tui;
 
 #[derive(Parser, Debug)]

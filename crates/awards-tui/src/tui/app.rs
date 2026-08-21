@@ -1,3 +1,4 @@
+use crate::config::AppConfig;
 use awards_core::{
     awards_excluding_duplicate_rows, col_to_index, collect_sheet_audit, find_duplicates_for_user,
     flatten_awards_sorted, format_audit_report, get_awards_for_username, normalize_username,
@@ -39,7 +40,14 @@ pub enum WorkerMsg {
         result: EditResult,
         username: String,
     },
-    AuditDone(Result<String, String>),
+    AuditDone(Result<AuditOutcome, String>),
+}
+
+#[derive(Debug, Clone)]
+pub struct AuditOutcome {
+    pub path: String,
+    pub body: String,
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +130,14 @@ pub enum Modal {
     Add(AddModal),
     Edit(EditModal),
     Delete(DeleteModal),
+    Audit(AuditModal),
+}
+
+#[derive(Debug)]
+pub struct AuditModal {
+    pub path: String,
+    pub lines: Vec<String>,
+    pub scroll: u16,
 }
 
 #[derive(Debug)]
@@ -171,6 +187,7 @@ pub struct App {
     pub awards_state: ListState,
     pub modal: Option<Modal>,
     pub should_quit: bool,
+    pub config: AppConfig,
     tx: Sender<WorkerMsg>,
     pending_delete: Option<Award>,
 }
@@ -179,6 +196,11 @@ impl App {
     pub fn new(tx: Sender<WorkerMsg>) -> Self {
         let mut actions_state = ListState::default();
         actions_state.select(Some(0));
+        let config = AppConfig::load();
+        let mut status = "Loading awards from Google Sheets...".to_string();
+        if let Some(path) = &config.loaded_from {
+            status = format!("Loading… · config {}", path.display());
+        }
 
         Self {
             data: None,
@@ -188,7 +210,7 @@ impl App {
             duplicates: Vec::new(),
             visible: Vec::new(),
             username: Input::default(),
-            status: "Loading awards from Google Sheets...".to_string(),
+            status,
             busy: false,
             loading: false,
             focus: FocusArea::Username,
@@ -197,6 +219,7 @@ impl App {
             awards_state: ListState::default(),
             modal: None,
             should_quit: false,
+            config,
             tx,
             pending_delete: None,
         }
@@ -231,10 +254,19 @@ impl App {
             } => self.handle_write_done(kind, result, username),
             WorkerMsg::AuditDone(result) => {
                 self.busy = false;
-                self.status = match result {
-                    Ok(message) => message,
-                    Err(message) => format!("Audit failed: {message}"),
-                };
+                match result {
+                    Ok(outcome) => {
+                        self.status = outcome.summary.clone();
+                        self.modal = Some(Modal::Audit(AuditModal {
+                            path: outcome.path,
+                            lines: outcome.body.lines().map(str::to_string).collect(),
+                            scroll: 0,
+                        }));
+                    }
+                    Err(message) => {
+                        self.status = format!("Audit failed: {message}");
+                    }
+                }
             }
         }
     }
@@ -427,8 +459,34 @@ impl App {
 
     fn handle_modal_key(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Esc {
+            let closing_audit = matches!(self.modal, Some(Modal::Audit(_)));
             self.modal = None;
-            self.status = "Dialog cancelled".to_string();
+            if !closing_audit {
+                self.status = "Dialog cancelled".to_string();
+            }
+            return;
+        }
+
+        if let Some(Modal::Audit(audit)) = self.modal.as_mut() {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    audit.scroll = audit.scroll.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    audit.scroll = audit.scroll.saturating_add(1);
+                }
+                KeyCode::PageUp => {
+                    audit.scroll = audit.scroll.saturating_sub(10);
+                }
+                KeyCode::PageDown => {
+                    audit.scroll = audit.scroll.saturating_add(10);
+                }
+                KeyCode::Home => audit.scroll = 0,
+                KeyCode::End => {
+                    audit.scroll = audit.lines.len().saturating_sub(1) as u16;
+                }
+                _ => {}
+            }
             return;
         }
 
@@ -494,6 +552,7 @@ impl App {
                         delete.input.handle_event(&event);
                     }
                 },
+                Modal::Audit(_) => {}
             }
         }
 
@@ -930,7 +989,7 @@ fn auth_note() -> String {
     }
 }
 
-fn run_audit_worker(data: Option<AwardsData>) -> Result<String, String> {
+fn run_audit_worker(data: Option<AwardsData>) -> Result<AuditOutcome, String> {
     let data = match data {
         Some(data) => data,
         None => build_awards_data(None).map_err(|err| err.to_string())?,
@@ -945,7 +1004,7 @@ fn run_audit_worker(data: Option<AwardsData>) -> Result<String, String> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
-    fs::write(&dest, body).map_err(|err| err.to_string())?;
+    fs::write(&dest, &body).map_err(|err| err.to_string())?;
 
     let identical = report
         .duplicate_groups
@@ -957,11 +1016,16 @@ fn run_audit_worker(data: Option<AwardsData>) -> Result<String, String> {
         .iter()
         .filter(|group| group.kind == "conflict")
         .count();
-    Ok(format!(
+    let summary = format!(
         "Wrote {} · {identical} identical · {conflict} conflict · {} similar",
         dest.display(),
         report.similar_pairs.len()
-    ))
+    );
+    Ok(AuditOutcome {
+        path: dest.display().to_string(),
+        body,
+        summary,
+    })
 }
 
 fn patch_sheet_cell(data: &mut AwardsData, award: &Award) {
