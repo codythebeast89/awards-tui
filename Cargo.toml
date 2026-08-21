@@ -21,7 +21,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 csv = "1"
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 open = "5"
 ratatui = "0.29"
 regex = "1"
