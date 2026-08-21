@@ -41,9 +41,7 @@ fn cell_stale_message(award: &Award, live: &str) -> String {
 fn live_cell_value(api: &SheetsApi, sheet: &str, col: &str, row: i32) -> Result<String, ApiError> {
     let vals = api.get_values(&a1(sheet, col, row))?;
     Ok(clean_cell(
-        vals.first()
-            .and_then(|r| r.first())
-            .map(|s| s.as_str()),
+        vals.first().and_then(|r| r.first()).map(|s| s.as_str()),
     ))
 }
 
@@ -54,7 +52,10 @@ pub fn find_live_row(api: &SheetsApi, award: &Award, window: i32) -> Result<Opti
     }
     let start = sheet_data_start_row(&award.sheet).max(award.row - window);
     let end = start.max(award.row + window);
-    let rng = format!("'{}'!{}{}:{}{}", award.sheet, award.col, start, award.col, end);
+    let rng = format!(
+        "'{}'!{}{}:{}{}",
+        award.sheet, award.col, start, award.col, end
+    );
     let values = api.get_values(&rng)?;
     Ok(match_row_in_window(&values, start, &award.cell, award.row))
 }
@@ -141,7 +142,10 @@ pub fn add_award_to_user(
         base_name: award_def.base_name.clone(),
     };
     EditResult::ok_msg(
-        format!("Added {display} for @{user} at {}{target_row}", award_def.col),
+        format!(
+            "Added {display} for @{user} at {}{target_row}",
+            award_def.col
+        ),
         Some(award),
     )
 }
@@ -168,8 +172,7 @@ pub fn update_award_cell(award: &Award, new_cell: &str, interactive_auth: bool) 
         Err(e) => return EditResult::err(format!("Update failed: {e}")),
     };
     let Some(live_row) = live_row else {
-        let live = live_cell_value(&api, &award.sheet, &award.col, award.row)
-            .unwrap_or_default();
+        let live = live_cell_value(&api, &award.sheet, &award.col, award.row).unwrap_or_default();
         return EditResult::err(cell_stale_message(award, &live));
     };
 
@@ -185,8 +188,8 @@ pub fn update_award_cell(award: &Award, new_cell: &str, interactive_auth: bool) 
     } else {
         award.base_name.as_str()
     };
-    let display =
-        format_award_name(&award.category, Some(base), new_cell).unwrap_or_else(|| award.name.clone());
+    let display = format_award_name(&award.category, Some(base), new_cell)
+        .unwrap_or_else(|| award.name.clone());
     let updated = Award {
         category: award.category,
         name: display,
@@ -218,8 +221,7 @@ pub fn remove_award(award: &Award, interactive_auth: bool) -> EditResult {
         Err(e) => return EditResult::err(format!("Delete failed: {e}")),
     };
     let Some(live_row) = live_row else {
-        let live = live_cell_value(&api, &award.sheet, &award.col, award.row)
-            .unwrap_or_default();
+        let live = live_cell_value(&api, &award.sheet, &award.col, award.row).unwrap_or_default();
         return EditResult::err(cell_stale_message(award, &live));
     };
 
@@ -231,12 +233,7 @@ pub fn remove_award(award: &Award, interactive_auth: bool) -> EditResult {
         Ok(v) => v,
         Err(e) => return EditResult::err(format!("Delete failed: {e}")),
     };
-    let live = clean_cell(
-        col_vals
-            .first()
-            .and_then(|r| r.first())
-            .map(|s| s.as_str()),
-    );
+    let live = clean_cell(col_vals.first().and_then(|r| r.first()).map(|s| s.as_str()));
     if live != clean_cell(Some(&award.cell)) {
         return EditResult::err(cell_stale_message(&award, &live));
     }
@@ -314,7 +311,10 @@ mod tests {
         let award = added.award.expect("award returned");
 
         let key = normalize_username(Some(user)).unwrap();
-        assert_eq!(normalize_username(Some(&award.cell)).as_deref(), Some(key.as_str()));
+        assert_eq!(
+            normalize_username(Some(&award.cell)).as_deref(),
+            Some(key.as_str())
+        );
 
         let removed = remove_award(&award, false);
         assert!(removed.ok, "delete failed: {}", removed.message);

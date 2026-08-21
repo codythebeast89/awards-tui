@@ -3,7 +3,11 @@ use crate::parse::normalize_username;
 use crate::types::{Award, DuplicateHit};
 use std::collections::{HashMap, HashSet};
 
-pub fn add_award(index: &mut HashMap<String, Vec<Award>>, username: Option<&str>, award: Option<&Award>) {
+pub fn add_award(
+    index: &mut HashMap<String, Vec<Award>>,
+    username: Option<&str>,
+    award: Option<&Award>,
+) {
     let (Some(username), Some(award)) = (username, award) else {
         return;
     };
@@ -52,12 +56,7 @@ pub fn drop_award_location(
     }
 }
 
-pub fn shift_column_up_in_rows(
-    rows: &mut [Vec<String>],
-    sheet: &str,
-    col: &str,
-    sheet_row: i32,
-) {
+pub fn shift_column_up_in_rows(rows: &mut [Vec<String>], sheet: &str, col: &str, sheet_row: i32) {
     use crate::meta::{col_to_index, row_offset};
     let csv_i = sheet_row - 1 - row_offset(sheet);
     let col_idx = col_to_index(col);
@@ -102,7 +101,10 @@ pub fn reindex_column_after_delete(
     }
 }
 
-pub fn upsert_award_in_index(index: &mut HashMap<String, Vec<Award>>, award: &Award) -> Option<String> {
+pub fn upsert_award_in_index(
+    index: &mut HashMap<String, Vec<Award>>,
+    award: &Award,
+) -> Option<String> {
     let key = normalize_username(Some(&award.cell))?;
     drop_award_location(index, &award.sheet, &award.col, award.row);
     add_award(index, Some(&key), Some(award));
@@ -171,8 +173,11 @@ pub fn flatten_awards_sorted(awards: &[Award]) -> Vec<Award> {
     out.sort_by(|a, b| {
         let oa = order.get(a.category.as_str()).copied().unwrap_or(99);
         let ob = order.get(b.category.as_str()).copied().unwrap_or(99);
-        oa.cmp(&ob)
-            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+        oa.cmp(&ob).then_with(|| {
+            a.name
+                .to_ascii_lowercase()
+                .cmp(&b.name.to_ascii_lowercase())
+        })
     });
     out
 }

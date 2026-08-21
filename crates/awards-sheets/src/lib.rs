@@ -6,8 +6,8 @@ mod edit;
 
 use awards_core::{
     add_award, clean_cell, col_to_index, csv_index_to_sheet_row, format_award_name, load_columns,
-    normalize_username, sheet_meta, Award, AwardColumn, AwardDef, AwardsData, SHEET_ID, SHEET_NAMES,
-    USER_AGENT,
+    normalize_username, sheet_meta, Award, AwardColumn, AwardDef, AwardsData, SHEET_ID,
+    SHEET_NAMES, USER_AGENT,
 };
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
@@ -143,9 +143,11 @@ pub fn build_awards_data_from_rows(
     }
 
     catalog.sort_by(|a, b| {
-        a.category
-            .cmp(&b.category)
-            .then_with(|| a.base_name.to_ascii_lowercase().cmp(&b.base_name.to_ascii_lowercase()))
+        a.category.cmp(&b.category).then_with(|| {
+            a.base_name
+                .to_ascii_lowercase()
+                .cmp(&b.base_name.to_ascii_lowercase())
+        })
     });
 
     AwardsData {

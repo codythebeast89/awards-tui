@@ -57,17 +57,12 @@ impl SheetsApi {
                 body: resp.text().unwrap_or_default(),
             });
         }
-        let parsed: ValuesResponse = resp
-            .json()
-            .map_err(|e| ApiError::Other(e.to_string()))?;
+        let parsed: ValuesResponse = resp.json().map_err(|e| ApiError::Other(e.to_string()))?;
         Ok(parsed.values)
     }
 
     pub fn update_values(&self, range: &str, values: Vec<Vec<String>>) -> Result<(), ApiError> {
-        let url = format!(
-            "{}?valueInputOption=USER_ENTERED",
-            Self::values_url(range)
-        );
+        let url = format!("{}?valueInputOption=USER_ENTERED", Self::values_url(range));
         let resp = self
             .client
             .put(url)

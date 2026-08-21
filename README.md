@@ -87,14 +87,16 @@ python3 test_awards.py
 
 ### Rust rewrite (in progress)
 
-Cargo workspace under `crates/` (`awards-core`, `awards-sheets`, `awards-tui`). Python remains the default UI until cutover.
+Cargo workspace under `crates/` (`awards-core`, `awards-sheets`, `awards-tui`). Python Textual remains available via `python3 main.py` until cutover.
 
 ```bash
-cargo test --workspace
-cargo run -p awards-tui -- --help
+cargo run -p awards-tui --release          # Ratatui TUI (default)
+cargo run -p awards-tui --release -- SomeUser
+cargo run -p awards-tui --release -- --audit
+cargo run -p awards-tui --release -- --auth-status
 ```
 
-`awards-core` ports the offline logic from `awards.py` (M0/M1). CSV lookup + `--audit` work via `cargo run -p awards-tui -- <user>` / `--audit` (M2). OAuth/`--login`/`--auth-status`/`--add` and edit/delete helpers are in `awards-sheets` (M3). Ratatui TUI is next (M4).
+Rust milestones: M0–M3 done (core, CSV/CLI, OAuth writes). **M4** Ratatui TUI matches the purple Actions / Awards tabs / Detail layout (a/e/d, F5, Ctrl+Q). Cutover is M5.
 
 ## License
 

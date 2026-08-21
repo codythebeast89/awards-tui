@@ -11,6 +11,8 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+mod tui;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "awards-tui",
@@ -83,7 +85,9 @@ fn cmd_audit(out_path: Option<PathBuf>) -> anyhow::Result<ExitCode> {
         path
     } else {
         let stamp = Utc::now().format("%Y-%m-%d_%H%M%S");
-        project_root().join("audits").join(format!("audit-{stamp}.txt"))
+        project_root()
+            .join("audits")
+            .join(format!("audit-{stamp}.txt"))
     };
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
@@ -234,7 +238,11 @@ fn main() -> ExitCode {
         };
     }
 
-    eprintln!("TUI not implemented yet (M4). Use `python3 main.py` for the Textual UI.");
-    eprintln!("Or: cargo run -p awards-tui -- <username> / --audit / --auth-status / --add …");
-    ExitCode::from(2)
+    match tui::run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("{err:#}");
+            ExitCode::FAILURE
+        }
+    }
 }

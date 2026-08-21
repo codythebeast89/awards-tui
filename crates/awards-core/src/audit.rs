@@ -67,10 +67,11 @@ pub fn find_duplicates_for_user(data: &AwardsData, username: &str) -> Vec<Duplic
             let issues = cell_format_issues(&cell);
 
             if cell_user == key {
-                exact_by_col
-                    .entry(col_key.clone())
-                    .or_default()
-                    .push((sheet_row, cell.clone(), cell_user.clone()));
+                exact_by_col.entry(col_key.clone()).or_default().push((
+                    sheet_row,
+                    cell.clone(),
+                    cell_user.clone(),
+                ));
                 if !issues.is_empty() {
                     push_hit(
                         &mut hits,
@@ -160,7 +161,11 @@ pub fn find_duplicates_for_user(data: &AwardsData, username: &str) -> Vec<Duplic
     hits.sort_by(|a, b| {
         a.reason
             .cmp(&b.reason)
-            .then_with(|| a.base_name.to_ascii_lowercase().cmp(&b.base_name.to_ascii_lowercase()))
+            .then_with(|| {
+                a.base_name
+                    .to_ascii_lowercase()
+                    .cmp(&b.base_name.to_ascii_lowercase())
+            })
             .then_with(|| a.row.cmp(&b.row))
     });
     hits
@@ -292,7 +297,8 @@ pub fn collect_sheet_audit(data: &AwardsData) -> AuditReport {
             if hits.len() < 2 {
                 continue;
             }
-            let cells: HashSet<String> = hits.iter().map(|(_r, c)| c.to_ascii_lowercase()).collect();
+            let cells: HashSet<String> =
+                hits.iter().map(|(_r, c)| c.to_ascii_lowercase()).collect();
             duplicate_groups.push(AuditDuplicateGroup {
                 user,
                 sheet: sheet.clone(),
@@ -313,7 +319,11 @@ pub fn collect_sheet_audit(data: &AwardsData) -> AuditReport {
             .len()
             .cmp(&a.rows.len())
             .then_with(|| a.user.cmp(&b.user))
-            .then_with(|| a.base_name.to_ascii_lowercase().cmp(&b.base_name.to_ascii_lowercase()))
+            .then_with(|| {
+                a.base_name
+                    .to_ascii_lowercase()
+                    .cmp(&b.base_name.to_ascii_lowercase())
+            })
     });
 
     let mut similar_pairs = Vec::new();

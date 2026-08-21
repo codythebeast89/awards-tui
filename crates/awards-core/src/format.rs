@@ -118,7 +118,9 @@ pub fn format_badge_award(base_name: &str, cell: &str) -> String {
         .and_then(|c| c[1].parse::<i32>().ok());
     let mut label = xcount.replace_all(detail, "").into_owned();
     label = label.split_whitespace().collect::<Vec<_>>().join(" ");
-    label = label.trim_matches(|c: char| c == ' ' || c == '-').to_string();
+    label = label
+        .trim_matches(|c: char| c == ' ' || c == '-')
+        .to_string();
 
     let label_upper = label.to_ascii_uppercase();
     if (label_upper == "MC" || label_upper == "ESB") && !detail.contains(',') {
@@ -132,7 +134,10 @@ pub fn format_badge_award(base_name: &str, cell: &str) -> String {
     if let Some(n) = count {
         if !detail.contains(',') {
             let mut name = base.to_string();
-            if !label.is_empty() && !name.to_ascii_lowercase().contains(&label.to_ascii_lowercase())
+            if !label.is_empty()
+                && !name
+                    .to_ascii_lowercase()
+                    .contains(&label.to_ascii_lowercase())
             {
                 if label.len() <= 4 {
                     name = expand_badge_abbrev(base, &label);

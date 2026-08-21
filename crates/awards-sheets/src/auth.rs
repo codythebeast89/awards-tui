@@ -235,7 +235,11 @@ fn refresh_authorized_user(tok: &mut AuthorizedUser) -> Result<(), AuthError> {
             ("grant_type", "refresh_token"),
         ],
     )
-    .map_err(|e| AuthError::msg(format!("Token refresh failed. Run: awards-tui --login ({e})")))?;
+    .map_err(|e| {
+        AuthError::msg(format!(
+            "Token refresh failed. Run: awards-tui --login ({e})"
+        ))
+    })?;
     apply_token_response(tok, resp);
     save_authorized_user(&token_path(), tok)?;
     Ok(())
@@ -276,8 +280,8 @@ fn access_token_from_service_account(path: &Path) -> Result<String, AuthError> {
         .map_err(|e| AuthError::msg(format!("service account key: {e}")))?;
     let mut header = Header::new(Algorithm::RS256);
     header.typ = Some("JWT".into());
-    let assertion = encode(&header, &claims, &key)
-        .map_err(|e| AuthError::msg(format!("JWT sign: {e}")))?;
+    let assertion =
+        encode(&header, &claims, &key).map_err(|e| AuthError::msg(format!("JWT sign: {e}")))?;
     let token_uri = sa
         .token_uri
         .unwrap_or_else(|| "https://oauth2.googleapis.com/token".into());
@@ -437,6 +441,9 @@ mod tests {
     #[test]
     fn extract_code_from_request_line() {
         let line = "GET /?code=abc%2Fdef&scope=x HTTP/1.1";
-        assert_eq!(extract_query_param(line, "code").as_deref(), Some("abc/def"));
+        assert_eq!(
+            extract_query_param(line, "code").as_deref(),
+            Some("abc/def")
+        );
     }
 }

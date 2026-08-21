@@ -13,7 +13,10 @@ fn test_normalize() {
         normalize_username(Some("\u{200b}\u{200b}amongus400and20")).as_deref(),
         Some("amongus400and20")
     );
-    assert_eq!(normalize_username(Some("Alice  ")).as_deref(), Some("alice"));
+    assert_eq!(
+        normalize_username(Some("Alice  ")).as_deref(),
+        Some("alice")
+    );
 }
 
 #[test]
@@ -112,8 +115,12 @@ fn test_format_ribbon() {
 
 #[test]
 fn test_format_badge() {
-    let cib = format_award_name("badges", Some("Combat Infantryman Badge"), "cancholic - MC x2")
-        .unwrap();
+    let cib = format_award_name(
+        "badges",
+        Some("Combat Infantryman Badge"),
+        "cancholic - MC x2",
+    )
+    .unwrap();
     assert_eq!(cib, "Master Combat Infantryman Badge (2nd Award)");
 
     let cab = format_award_name("badges", Some("Combat Action Badge"), "user - MC").unwrap();
@@ -135,10 +142,7 @@ fn test_format_badge() {
         "user - Master (1x CJS)",
     )
     .unwrap();
-    assert_eq!(
-        one_cjs,
-        "Army Parachutist Badge (Master, Combat Jump Star)"
-    );
+    assert_eq!(one_cjs, "Army Parachutist Badge (Master, Combat Jump Star)");
 
     let x1_cjs = format_award_name(
         "badges",
@@ -146,10 +150,7 @@ fn test_format_badge() {
         "user - Basic (x1 CJS)",
     )
     .unwrap();
-    assert_eq!(
-        x1_cjs,
-        "Military Freefall Badge (Basic, Combat Jump Star)"
-    );
+    assert_eq!(x1_cjs, "Military Freefall Badge (Basic, Combat Jump Star)");
 
     let three_cjs = format_award_name(
         "badges",
@@ -232,7 +233,11 @@ fn test_build_cell_value() {
 #[test]
 fn test_find_first_empty() {
     let rows = vec![
-        vec!["".into(), "".into(), "Army Distinguished Service Cross".into()],
+        vec![
+            "".into(),
+            "".into(),
+            "Army Distinguished Service Cross".into(),
+        ],
         vec!["".into(), "".into(), "user1".into()],
         vec!["".into(), "".into(), "".into()],
         vec!["".into(), "".into(), "user2".into()],
