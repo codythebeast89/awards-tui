@@ -7,7 +7,7 @@ use awards_core::{
 };
 use awards_sheets::{
     add_award_to_user, auth_status, award_with_live_row, build_awards_data, project_root,
-    remove_award, update_award_cell, EditResult, SheetsApi,
+    remove_award, rename_username, update_award_cell, EditResult, SheetsApi,
 };
 use chrono::Utc;
 use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -23,6 +23,7 @@ const ACTIONS: &[Action] = &[
     Action::Add,
     Action::Edit,
     Action::Delete,
+    Action::Rename,
     Action::Refresh,
     Action::Audit,
 ];
@@ -65,6 +66,7 @@ pub enum Action {
     Add,
     Edit,
     Delete,
+    Rename,
     Refresh,
     Audit,
 }
@@ -76,6 +78,7 @@ impl Action {
             Self::Add => "Add",
             Self::Edit => "Edit",
             Self::Delete => "Delete",
+            Self::Rename => "Rename",
             Self::Refresh => "Refresh",
             Self::Audit => "Audit",
         }
@@ -131,6 +134,7 @@ pub enum Modal {
     Add(AddModal),
     Edit(EditModal),
     Delete(DeleteModal),
+    Rename(RenameModal),
     Audit(AuditModal),
 }
 
@@ -169,6 +173,22 @@ pub struct DeleteModal {
     pub award: Award,
     pub input: Input,
     pub viewed_username: String,
+}
+
+#[derive(Debug)]
+pub enum RenameStep {
+    Name,
+    Confirm,
+}
+
+#[derive(Debug)]
+pub struct RenameModal {
+    pub from: String,
+    pub cell_count: usize,
+    pub existing_new: usize,
+    pub input: Input,
+    pub confirm: Input,
+    pub step: RenameStep,
 }
 
 pub struct App {
@@ -303,6 +323,7 @@ impl App {
             KeyCode::Char('a') if self.focus != FocusArea::Username => self.action_add(),
             KeyCode::Char('e') if self.focus != FocusArea::Username => self.action_edit(),
             KeyCode::Char('d') if self.focus != FocusArea::Username => self.action_delete(),
+            KeyCode::Char('n') if self.focus != FocusArea::Username => self.action_rename(),
             KeyCode::Enter if self.focus == FocusArea::Detail => self.action_edit(),
             _ => match self.focus {
                 FocusArea::Username => {
@@ -380,6 +401,7 @@ impl App {
             "add" => self.apply_add_result(result, username),
             "edit" => self.apply_edit_result(result, username),
             "delete" => self.apply_delete_result(result, username),
+            "rename" => self.apply_rename_result(result, username),
             _ => {
                 self.status = result.message;
             }
@@ -428,6 +450,19 @@ impl App {
                 shift_column_up_in_rows(rows, &award.sheet, &award.col, award.row);
             }
             self.apply_user_view(&username, None, Some(result.message));
+        } else {
+            self.status = result.message;
+        }
+    }
+
+    fn apply_rename_result(&mut self, result: EditResult, username: String) {
+        if let Some(data) = self.data.as_mut() {
+            for award in &result.awards {
+                upsert_award_in_index(&mut data.index, award);
+                patch_sheet_cell(data, award);
+            }
+            self.username = input_with_value(username.clone());
+            self.apply_user_view(&username, result.awards.first(), Some(result.message));
         } else {
             self.status = result.message;
         }
@@ -507,6 +542,7 @@ impl App {
         let mut add_confirm: Option<(AwardDef, String)> = None;
         let mut edit_confirm: Option<(Award, String)> = None;
         let mut delete_confirm: Option<Award> = None;
+        let mut rename_confirm: Option<String> = None;
         let mut status: Option<String> = None;
 
         if let Some(modal) = self.modal.as_mut() {
@@ -565,6 +601,41 @@ impl App {
                         delete.input.handle_event(&event);
                     }
                 },
+                Modal::Rename(rename) => match rename.step {
+                    RenameStep::Name => match key.code {
+                        KeyCode::Enter => {
+                            let raw = rename.input.value().trim();
+                            if let Some(new_key) = normalize_username(Some(raw)) {
+                                if new_key == rename.from {
+                                    status = Some(
+                                        "New username is the same as the current name".to_string(),
+                                    );
+                                } else {
+                                    rename.step = RenameStep::Confirm;
+                                }
+                            } else {
+                                status = Some("Enter the new Roblox username".to_string());
+                            }
+                        }
+                        _ => {
+                            let event = CrosstermEvent::Key(key);
+                            rename.input.handle_event(&event);
+                        }
+                    },
+                    RenameStep::Confirm => match key.code {
+                        KeyCode::Enter => {
+                            if rename.confirm.value().trim().eq_ignore_ascii_case("rename") {
+                                rename_confirm = Some(rename.input.value().trim().to_string());
+                            } else {
+                                status = Some("Type \"rename\" to confirm".to_string());
+                            }
+                        }
+                        _ => {
+                            let event = CrosstermEvent::Key(key);
+                            rename.confirm.handle_event(&event);
+                        }
+                    },
+                },
                 Modal::Audit(_) => {}
             }
         }
@@ -572,6 +643,16 @@ impl App {
         if add_filter_changed {
             if let Some(Modal::Add(add)) = self.modal.as_mut() {
                 add.reload();
+            }
+        }
+        if let Some(Modal::Rename(rename)) = self.modal.as_mut() {
+            if matches!(rename.step, RenameStep::Confirm) {
+                let new_key = normalize_username(Some(rename.input.value())).unwrap_or_default();
+                rename.existing_new = self
+                    .data
+                    .as_ref()
+                    .map(|data| get_awards_for_username(&data.index, &new_key).len())
+                    .unwrap_or(0);
             }
         }
         if let Some(message) = status {
@@ -588,6 +669,10 @@ impl App {
         if let Some(award) = delete_confirm {
             self.modal = None;
             self.commit_delete(award);
+        }
+        if let Some(new_username) = rename_confirm {
+            self.modal = None;
+            self.commit_rename(new_username);
         }
     }
 
@@ -633,6 +718,7 @@ impl App {
             Action::Add => self.action_add(),
             Action::Edit => self.action_edit(),
             Action::Delete => self.action_delete(),
+            Action::Rename => self.action_rename(),
             Action::Refresh => self.action_refresh(),
             Action::Audit => self.action_audit(),
         }
@@ -752,6 +838,55 @@ impl App {
         }));
     }
 
+    fn action_rename(&mut self) {
+        if !self.begin_dialog() {
+            return;
+        }
+        let Some(from) = self.results_username.clone() else {
+            self.modal = None;
+            self.status = "Look up a user before renaming".to_string();
+            return;
+        };
+        let Some(data) = self.data.as_ref() else {
+            self.modal = None;
+            self.status = "Still loading...".to_string();
+            return;
+        };
+        let owned: Vec<Award> = self
+            .results
+            .iter()
+            .chain(self.duplicates.iter())
+            .filter(|award| {
+                normalize_username(Some(&award.cell)).as_deref() == Some(from.as_str())
+                    && !award.sheet.is_empty()
+                    && !award.col.is_empty()
+                    && award.row != 0
+            })
+            .cloned()
+            .collect();
+        let cell_count = if owned.is_empty() {
+            get_awards_for_username(&data.index, &from)
+                .iter()
+                .filter(|award| !award.sheet.is_empty() && !award.col.is_empty() && award.row != 0)
+                .count()
+        } else {
+            owned.len()
+        };
+        if cell_count == 0 {
+            self.modal = None;
+            self.status = format!("No sheet cells found for @{from}");
+            return;
+        }
+        self.modal = Some(Modal::Rename(RenameModal {
+            from,
+            cell_count,
+            existing_new: 0,
+            input: Input::default(),
+            confirm: Input::default(),
+            step: RenameStep::Name,
+        }));
+    }
+
     fn commit_add(&mut self, award_def: AwardDef, suffix: String) {
         if !self.begin_busy(&format!("Writing {}...", award_def.base_name)) {
             return;
@@ -797,6 +932,27 @@ impl App {
                 kind: "delete",
                 result,
                 username,
+            });
+        });
+    }
+
+    fn commit_rename(&mut self, new_username: String) {
+        let old_username = self.results_username.clone().unwrap_or_default();
+        if !self.begin_busy(&format!(
+            "Renaming @{old_username} → {new_username} across the sheet..."
+        )) {
+            return;
+        }
+        let data = self.data.clone();
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let result = rename_username(&old_username, &new_username, data.as_ref(), false);
+            let view_user = normalize_username(Some(&new_username))
+                .unwrap_or_else(|| new_username.trim().trim_start_matches('@').to_string());
+            let _ = tx.send(WorkerMsg::WriteDone {
+                kind: "rename",
+                result,
+                username: view_user,
             });
         });
     }

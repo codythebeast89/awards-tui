@@ -231,6 +231,27 @@ fn test_build_cell_value() {
 }
 
 #[test]
+fn test_replace_username_in_cell() {
+    assert_eq!(
+        replace_username_in_cell("Alice", "Bob").as_deref(),
+        Some("Bob")
+    );
+    assert_eq!(
+        replace_username_in_cell("@alice x2", "NewName").as_deref(),
+        Some("NewName x2")
+    );
+    assert_eq!(
+        replace_username_in_cell("alice - 75th CSIB", "Nova").as_deref(),
+        Some("Nova - 75th CSIB")
+    );
+    assert_eq!(
+        replace_username_in_cell("alice - Master  (x5 CJS)", "bob").as_deref(),
+        Some("bob - Master  (x5 CJS)")
+    );
+    assert_eq!(replace_username_in_cell("", "Bob"), None);
+}
+
+#[test]
 fn test_find_first_empty() {
     let rows = vec![
         vec![

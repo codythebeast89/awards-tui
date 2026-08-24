@@ -4,7 +4,7 @@ use awards_core::{
 };
 use awards_sheets::{
     add_award_to_user, auth_status, build_awards_data, credentials_path, login, project_root,
-    remove_award, service_account_path, token_path, update_award_cell,
+    remove_award, rename_username, service_account_path, token_path, update_award_cell,
 };
 use chrono::Utc;
 use clap::Parser;
@@ -56,6 +56,10 @@ struct Cli {
     /// Delete an existing award for USERNAME (match by award name).
     #[arg(long, value_name = "AWARD")]
     delete: Option<String>,
+
+    /// Rewrite USERNAME to NEW across every matching sheet cell.
+    #[arg(long, value_name = "NEW")]
+    rename: Option<String>,
 
     /// Optional cell suffix when using --add (e.g. x2).
     #[arg(long, default_value = "")]
@@ -273,6 +277,18 @@ fn cmd_delete(username: &str, award_query: &str) -> anyhow::Result<ExitCode> {
     })
 }
 
+fn cmd_rename(old_username: &str, new_username: &str) -> anyhow::Result<ExitCode> {
+    eprintln!("Syncing awards…");
+    let data = build_awards_data(None)?;
+    let result = rename_username(old_username, new_username, Some(&data), false);
+    println!("{}", result.message);
+    Ok(if result.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -327,6 +343,19 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         };
         return match cmd_delete(username, award) {
+            Ok(code) => code,
+            Err(err) => {
+                eprintln!("{err:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if let Some(new_username) = cli.rename.as_deref() {
+        let Some(username) = cli.username.as_deref() else {
+            eprintln!("username is required with --rename");
+            return ExitCode::from(2);
+        };
+        return match cmd_rename(username, new_username) {
             Ok(code) => code,
             Err(err) => {
                 eprintln!("{err:#}");

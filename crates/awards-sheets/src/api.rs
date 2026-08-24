@@ -78,6 +78,46 @@ impl SheetsApi {
         }
         Ok(())
     }
+
+    pub fn batch_update_values(
+        &self,
+        ranges: Vec<(String, Vec<Vec<String>>)>,
+    ) -> Result<(), ApiError> {
+        if ranges.is_empty() {
+            return Ok(());
+        }
+        let url = format!(
+            "https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values:batchUpdate"
+        );
+        for chunk in ranges.chunks(50) {
+            let data: Vec<serde_json::Value> = chunk
+                .iter()
+                .map(|(range, values)| {
+                    json!({
+                        "range": range,
+                        "values": values,
+                    })
+                })
+                .collect();
+            let resp = self
+                .client
+                .post(&url)
+                .bearer_auth(&self.token)
+                .json(&json!({
+                    "valueInputOption": "USER_ENTERED",
+                    "data": data,
+                }))
+                .send()
+                .map_err(|e| ApiError::Other(e.to_string()))?;
+            if !resp.status().is_success() {
+                return Err(ApiError::Http {
+                    status: resp.status().as_u16(),
+                    body: resp.text().unwrap_or_default(),
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 pub fn a1(sheet: &str, col: &str, row: i32) -> String {

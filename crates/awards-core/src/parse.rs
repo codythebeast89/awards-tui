@@ -94,6 +94,24 @@ pub fn cell_format_issues(cell: &str) -> Vec<String> {
     issues
 }
 
+/// Replace the leading username in a cell, keeping suffixes (`x2`, `- detail`).
+pub fn replace_username_in_cell(cell: &str, new_username: &str) -> Option<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"^@?([A-Za-z0-9_]+)").unwrap());
+    let new_user = new_username.trim().trim_start_matches('@');
+    if new_user.is_empty() || normalize_username(Some(new_user)).is_none() {
+        return None;
+    }
+    let text = clean_cell(Some(cell));
+    let caps = re.captures(&text)?;
+    let rest = text[caps.get(0)?.end()..].trim_start();
+    if rest.is_empty() {
+        Some(new_user.to_string())
+    } else {
+        Some(format!("{new_user} {rest}"))
+    }
+}
+
 /// Build a sheet cell value from username + optional suffix (from Python sheets_edit).
 pub fn build_cell_value(username: &str, suffix: &str) -> String {
     let user = username.trim().trim_start_matches('@');

@@ -2,8 +2,9 @@
 
 use crate::api::{a1, ApiError, SheetsApi};
 use awards_core::{
-    build_cell_value, clean_cell, format_award_name, match_row_in_window, normalize_username,
-    sheet_data_start_row, Award, AwardDef,
+    build_cell_value, clean_cell, format_award_name, get_awards_for_username, match_row_in_window,
+    normalize_username, owned_award_columns, replace_username_in_cell, sheet_data_start_row, Award,
+    AwardDef, AwardsData,
 };
 
 #[derive(Debug, Clone)]
@@ -11,6 +12,7 @@ pub struct EditResult {
     pub ok: bool,
     pub message: String,
     pub award: Option<Award>,
+    pub awards: Vec<Award>,
 }
 
 impl EditResult {
@@ -19,6 +21,16 @@ impl EditResult {
             ok: true,
             message: message.into(),
             award,
+            awards: Vec::new(),
+        }
+    }
+
+    fn ok_many(message: impl Into<String>, awards: Vec<Award>) -> Self {
+        Self {
+            ok: true,
+            message: message.into(),
+            award: awards.first().cloned(),
+            awards,
         }
     }
 
@@ -27,6 +39,7 @@ impl EditResult {
             ok: false,
             message: message.into(),
             award: None,
+            awards: Vec::new(),
         }
     }
 }
@@ -326,6 +339,156 @@ pub fn remove_award(award: &Award, interactive_auth: bool) -> EditResult {
         ),
         None,
     )
+}
+
+/// Rewrite every cell owned by `old_username` to `new_username`, keeping suffixes.
+pub fn rename_username(
+    old_username: &str,
+    new_username: &str,
+    data: Option<&AwardsData>,
+    interactive_auth: bool,
+) -> EditResult {
+    let Some(old_key) = normalize_username(Some(old_username)) else {
+        return EditResult::err("Old username required");
+    };
+    let display_new = new_username.trim().trim_start_matches('@');
+    let Some(new_key) = normalize_username(Some(display_new)) else {
+        return EditResult::err("New username must start with a Roblox-style name");
+    };
+    if old_key == new_key {
+        return EditResult::err("New username is the same as the current name");
+    }
+
+    let fetched;
+    let data = match data {
+        Some(data) => data,
+        None => match crate::build_awards_data(None) {
+            Ok(data) => {
+                fetched = data;
+                &fetched
+            }
+            Err(err) => return EditResult::err(err.to_string()),
+        },
+    };
+
+    let mut awards: Vec<Award> = get_awards_for_username(&data.index, &old_key)
+        .into_iter()
+        .filter(|award| !award.sheet.is_empty() && !award.col.is_empty() && award.row != 0)
+        .collect();
+    if awards.is_empty() {
+        return EditResult::err(format!("No sheet cells found for @{old_key}"));
+    }
+
+    let existing_new = get_awards_for_username(&data.index, &new_key);
+    let new_owned = owned_award_columns(&existing_new, &new_key);
+    let overlaps: Vec<&Award> = awards
+        .iter()
+        .filter(|award| new_owned.contains(&(award.sheet.clone(), award.col.clone())))
+        .collect();
+    if !overlaps.is_empty() {
+        let sample = overlaps
+            .iter()
+            .take(5)
+            .map(|award| {
+                format!(
+                    "{} {}{}",
+                    if award.base_name.is_empty() {
+                        award.name.as_str()
+                    } else {
+                        award.base_name.as_str()
+                    },
+                    award.col,
+                    award.row
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return EditResult::err(format!(
+            "@{new_key} already has {} overlapping award column(s) ({sample}). Resolve those first.",
+            overlaps.len()
+        ));
+    }
+
+    let api = match SheetsApi::connect(interactive_auth) {
+        Ok(api) => api,
+        Err(err) => return EditResult::err(err.to_string()),
+    };
+
+    let mut writes: Vec<(String, Vec<Vec<String>>, Award)> = Vec::new();
+    let mut skipped = 0usize;
+    for award in awards.drain(..) {
+        let live_row = match find_live_row(&api, &award, 24) {
+            Ok(Some(row)) => row,
+            Ok(None) => {
+                skipped += 1;
+                continue;
+            }
+            Err(err) => return EditResult::err(format!("Rename failed: {err}")),
+        };
+        let mut award = award;
+        award.row = live_row;
+        let live = match live_cell_value(&api, &award.sheet, &award.col, award.row) {
+            Ok(value) => value,
+            Err(err) => return EditResult::err(format!("Rename failed: {err}")),
+        };
+        if normalize_username(Some(&live)).as_deref() != Some(old_key.as_str()) {
+            skipped += 1;
+            continue;
+        }
+        let Some(new_cell) = replace_username_in_cell(&live, display_new) else {
+            skipped += 1;
+            continue;
+        };
+        if new_cell == live {
+            continue;
+        }
+        let display = format_award_name(&award.category, Some(award.base_name.as_str()), &new_cell)
+            .unwrap_or_else(|| award.name.clone());
+        let updated = Award {
+            category: award.category,
+            name: display,
+            sheet: award.sheet.clone(),
+            col: award.col.clone(),
+            row: award.row,
+            cell: new_cell.clone(),
+            base_name: award.base_name,
+        };
+        writes.push((
+            a1(&updated.sheet, &updated.col, updated.row),
+            vec![vec![new_cell]],
+            updated,
+        ));
+    }
+
+    if writes.is_empty() {
+        return EditResult::err(format!(
+            "No live cells still belonged to @{old_key}. Refresh and try again."
+        ));
+    }
+
+    let payload: Vec<(String, Vec<Vec<String>>)> = writes
+        .iter()
+        .map(|(range, values, _)| (range.clone(), values.clone()))
+        .collect();
+    if let Err(err) = api.batch_update_values(payload) {
+        return EditResult::err(format!("Rename write failed: {err}"));
+    }
+
+    let updated: Vec<Award> = writes.into_iter().map(|(_, _, award)| award).collect();
+    let mut message = format!(
+        "Renamed @{old_key} → {display_new} in {} cell(s)",
+        updated.len()
+    );
+    if skipped > 0 {
+        message.push_str(&format!(" · skipped {skipped} stale/moved"));
+    }
+    if !existing_new.is_empty() {
+        message.push_str(&format!(
+            " · merged with {} existing @{new_key} award(s)",
+            existing_new.len()
+        ));
+    }
+    EditResult::ok_many(message, updated)
 }
 
 #[cfg(test)]

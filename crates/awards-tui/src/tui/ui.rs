@@ -1,6 +1,9 @@
 use crate::{
     config::Theme,
-    tui::app::{category_label, AddStep, App, AuditModal, AwardTab, FocusArea, Modal, VisibleAward},
+    tui::app::{
+        category_label, AddStep, App, AuditModal, AwardTab, FocusArea, Modal, RenameStep,
+        VisibleAward,
+    },
 };
 use awards_core::{normalize_username, AwardDef};
 use ratatui::{
@@ -249,7 +252,7 @@ fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme) {
 fn render_footer(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     frame.render_widget(
         Paragraph::new(
-            "Ctrl+Q quit · Tab focus · Enter/e edit · d delete · a add · Audit browser · F5 refresh · [ ] tabs",
+            "Ctrl+Q quit · Tab focus · Enter/e edit · d delete · a add · n rename · Audit · F5 · [ ] tabs",
         )
         .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
         area,
@@ -262,6 +265,10 @@ fn render_modal(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme)
         Some(Modal::Add(_)) => centered_rect(70, 10, area),
         Some(Modal::Edit(_)) => centered_rect(70, 11, area),
         Some(Modal::Delete(_)) => centered_rect(72, 12, area),
+        Some(Modal::Rename(rename)) if matches!(rename.step, RenameStep::Confirm) => {
+            centered_rect(74, 14, area)
+        }
+        Some(Modal::Rename(_)) => centered_rect(70, 12, area),
         Some(Modal::Audit(_)) => centered_rect(100, 30, area),
         None => return,
     };
@@ -270,6 +277,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme)
         Some(Modal::Add(add)) => render_add_modal(frame, add, modal_area, theme),
         Some(Modal::Edit(edit)) => render_edit_modal(frame, edit, modal_area, theme),
         Some(Modal::Delete(delete)) => render_delete_modal(frame, delete, modal_area, theme),
+        Some(Modal::Rename(rename)) => render_rename_modal(frame, rename, modal_area, theme),
         Some(Modal::Audit(audit)) => render_audit_modal(frame, audit, modal_area, theme),
         None => {}
     }
@@ -504,6 +512,109 @@ fn render_delete_modal(
             .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
         chunks[3],
     );
+}
+
+fn render_rename_modal(
+    frame: &mut Frame<'_>,
+    rename: &crate::tui::app::RenameModal,
+    area: Rect,
+    theme: &Theme,
+) {
+    let block = Block::default()
+        .title(" Rename Username ")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(theme.text).bg(theme.panel_alt))
+        .border_style(theme.purple);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    match rename.step {
+        RenameStep::Name => {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(2),
+                    Constraint::Length(3),
+                    Constraint::Length(1),
+                ])
+                .split(inner);
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "Rewrite all {} sheet cell(s) for @{} to the new Roblox username.",
+                    rename.cell_count, rename.from
+                ))
+                .style(Style::default().fg(theme.purple).bg(theme.panel_alt))
+                .wrap(Wrap { trim: true }),
+                chunks[0],
+            );
+            render_text_input(
+                frame,
+                chunks[1],
+                &rename.input,
+                Style::default().fg(theme.text).bg(theme.input_bg),
+                Block::default()
+                    .title(" new username ")
+                    .borders(Borders::ALL)
+                    .border_style(theme.purple),
+                true,
+            );
+            frame.render_widget(
+                Paragraph::new("Enter continue · Esc cancel")
+                    .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
+                chunks[2],
+            );
+        }
+        RenameStep::Confirm => {
+            let new_name = rename.input.value().trim();
+            let warning = if rename.existing_new > 0 {
+                format!(
+                    "@{new_name} already has {} award(s). Overlapping columns will be refused.",
+                    rename.existing_new
+                )
+            } else {
+                format!(
+                    "Update {} cell(s): @{} → {new_name}. Suffixes (x2, - detail) are kept.",
+                    rename.cell_count, rename.from
+                )
+            };
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Length(1),
+                    Constraint::Length(3),
+                    Constraint::Length(1),
+                ])
+                .split(inner);
+            frame.render_widget(
+                Paragraph::new(warning)
+                    .style(Style::default().fg(theme.dup).bg(theme.panel_alt))
+                    .wrap(Wrap { trim: true }),
+                chunks[0],
+            );
+            frame.render_widget(
+                Paragraph::new("Type \"rename\" to confirm")
+                    .style(Style::default().fg(theme.text).bg(theme.panel_alt)),
+                chunks[1],
+            );
+            render_text_input(
+                frame,
+                chunks[2],
+                &rename.confirm,
+                Style::default().fg(theme.text).bg(theme.input_bg),
+                Block::default()
+                    .title(" confirm ")
+                    .borders(Borders::ALL)
+                    .border_style(theme.dup),
+                true,
+            );
+            frame.render_widget(
+                Paragraph::new("Enter rename · Esc cancel")
+                    .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
+                chunks[3],
+            );
+        }
+    }
 }
 
 fn render_audit_modal(frame: &mut Frame<'_>, audit: &mut AuditModal, area: Rect, theme: &Theme) {

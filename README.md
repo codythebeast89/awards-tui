@@ -80,6 +80,7 @@ Purple dark layout: username bar, fixed **Actions** pane, tabbed **Awards** list
 | a | Add award for current user |
 | e | Edit selected award cell |
 | d | Delete selected award (type `delete` to confirm) |
+| n | Rename current user across all sheet cells (type `rename` to confirm) |
 | F5 / Ctrl+R | Refresh sheet data |
 | Tab | Cycle focus |
 | Ctrl+Q | Quit |
@@ -113,6 +114,7 @@ awards-tui --audit-out ~/Desktop/decorations-audit.txt
 awards-tui SomeUsername --add "Army Service" --suffix "x2"
 awards-tui SomeUsername --edit "Army Service" --cell "SomeUsername x2"
 awards-tui SomeUsername --delete "Army Service"
+awards-tui OldUsername --rename NewUsername
 awards-tui --login
 awards-tui --auth-status
 ```
@@ -120,7 +122,8 @@ awards-tui --auth-status
 ## Notes
 
 - Lookups use the public CSV export (no credentials required).
-- Add/edit/delete use the Sheets API and require OAuth or a service account.
+- Add/edit/delete/rename use the Sheets API and require OAuth or a service account.
+- **Rename** rewrites every cell for a user (`OldName --rename NewName` or Actions → Rename / `n`), keeping suffixes like `x2` and `- detail`. Overlapping columns on the new name are refused.
 - Delete clears the award cell and **shifts that column up** so no blank hole is left.
 - Award cells are written like `Username`, `Username x2`, or `Username - detail`.
 - Sheet row numbers include CSV→live offsets: Badges **+6**, Ribbons **+8**, Foreign Awards **+7**. When logged in, lookup reconciles mid-sheet lag against the live sheet.
