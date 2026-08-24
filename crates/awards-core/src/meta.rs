@@ -3,7 +3,11 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 pub const SHEET_ID: &str = "1e_AqHIGrGdfNSgoHt6kLV89E6LADJmlZzhfRAUXo0wY";
-pub const USER_AGENT: &str = "awards-tui/2.1 (decorations lookup + edit)";
+pub const USER_AGENT: &str = concat!(
+    "awards-tui/",
+    env!("CARGO_PKG_VERSION"),
+    " (decorations lookup + edit)"
+);
 
 pub const SHEET_NAMES: &[&str] = &[
     "Ribbons Database",
@@ -107,8 +111,15 @@ pub fn index_to_col(idx: usize) -> String {
     letters.into_iter().rev().collect()
 }
 
-/// Load award column definitions. Prefers `award_columns.json` next to the
-/// workspace root; falls back to the embedded copy shipped with this crate.
+/// Load award column definitions.
+///
+/// Search order matches the shared data root used for credentials:
+/// 1. `AWARDS_COLUMNS_PATH`
+/// 2. `AWARDS_ROOT/award_columns.json`
+/// 3. `./award_columns.json`
+/// 4. `~/.config/awards-tui/award_columns.json`
+/// 5. workspace checkout (dev builds)
+/// 6. embedded JSON shipped with this crate
 pub fn load_columns() -> Vec<AwardColumn> {
     if let Ok(path) = std::env::var("AWARDS_COLUMNS_PATH") {
         if let Ok(text) = std::fs::read_to_string(&path) {
@@ -117,10 +128,20 @@ pub fn load_columns() -> Vec<AwardColumn> {
             }
         }
     }
-    for candidate in [
-        std::path::PathBuf::from("award_columns.json"),
+
+    let mut candidates = Vec::new();
+    if let Ok(root) = std::env::var("AWARDS_ROOT") {
+        candidates.push(std::path::PathBuf::from(root).join("award_columns.json"));
+    }
+    candidates.push(std::path::PathBuf::from("award_columns.json"));
+    if let Some(config) = dirs::config_dir() {
+        candidates.push(config.join("awards-tui").join("award_columns.json"));
+    }
+    candidates.push(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../award_columns.json"),
-    ] {
+    );
+
+    for candidate in candidates {
         if let Ok(text) = std::fs::read_to_string(&candidate) {
             if let Ok(cols) = serde_json::from_str(&text) {
                 return cols;

@@ -22,6 +22,7 @@ clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 csv = "1"
 dirs = "6"
+getrandom = "0.2"
 jsonwebtoken = { version = "10.3", default-features = false, features = ["use_pem", "rust_crypto"] }
 open = "5"
 ratatui = "0.30"

@@ -310,6 +310,7 @@ struct SaClaims {
 }
 
 fn access_token_from_service_account(path: &Path) -> Result<String, AuthError> {
+    warn_if_insecure_secret_file(path);
     let text = std::fs::read_to_string(path)?;
     let sa: ServiceAccountFile = serde_json::from_str(&text)?;
     let now = Utc::now().timestamp();
@@ -340,6 +341,32 @@ fn access_token_from_service_account(path: &Path) -> Result<String, AuthError> {
         ],
     )?;
     Ok(resp.access_token)
+}
+
+/// Warn when a secret JSON file is group/world-readable (Unix only).
+fn warn_if_insecure_secret_file(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mode = meta.permissions().mode() & 0o777;
+            if secret_mode_too_open(mode) {
+                eprintln!(
+                    "warning: {} is readable by group/others (mode {mode:03o}); chmod 600 recommended",
+                    path.display()
+                );
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+#[cfg(unix)]
+fn secret_mode_too_open(mode: u32) -> bool {
+    mode & 0o077 != 0
 }
 
 /// Return a bearer access token for Sheets write access.
@@ -467,6 +494,11 @@ fn interactive_login(oauth_path: &Path) -> Result<String, AuthError> {
 }
 
 fn oauth_state() -> String {
+    let mut bytes = [0u8; 16];
+    if getrandom::getrandom(&mut bytes).is_ok() {
+        return bytes.iter().map(|b| format!("{b:02x}")).collect();
+    }
+    // Extremely unlikely; keep login usable if the OS RNG is unavailable.
     format!(
         "{:x}-{:x}",
         Utc::now().timestamp_nanos_opt().unwrap_or(0),
@@ -491,6 +523,7 @@ fn extract_query_param(request_line: &str, key: &str) -> Option<String> {
 /// Returns a short user-facing success message.
 pub fn login() -> Result<String, AuthError> {
     if let Some(sa) = service_account_path() {
+        warn_if_insecure_secret_file(&sa);
         let text = std::fs::read_to_string(&sa)?;
         let v: serde_json::Value = serde_json::from_str(&text)?;
         let email = v
@@ -557,5 +590,15 @@ mod tests {
             Some(v) => std::env::set_var("AWARDS_ROOT", v),
             None => std::env::remove_var("AWARDS_ROOT"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_mode_flags_group_or_world() {
+        assert!(!secret_mode_too_open(0o600));
+        assert!(!secret_mode_too_open(0o400));
+        assert!(secret_mode_too_open(0o640));
+        assert!(secret_mode_too_open(0o644));
+        assert!(secret_mode_too_open(0o606));
     }
 }

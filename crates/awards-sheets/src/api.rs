@@ -16,6 +16,16 @@ pub enum ApiError {
     Other(String),
 }
 
+/// Failure from [`SheetsApi::batch_update_values`], including how many ranges
+/// already landed before the failing chunk.
+#[derive(Debug, Error)]
+#[error("{cause}")]
+pub struct BatchUpdateError {
+    pub written: usize,
+    #[source]
+    pub cause: ApiError,
+}
+
 #[derive(Debug, Clone)]
 pub struct SheetsApi {
     token: String,
@@ -82,13 +92,14 @@ impl SheetsApi {
     pub fn batch_update_values(
         &self,
         ranges: Vec<(String, Vec<Vec<String>>)>,
-    ) -> Result<(), ApiError> {
+    ) -> Result<(), BatchUpdateError> {
         if ranges.is_empty() {
             return Ok(());
         }
         let url = format!(
             "https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values:batchUpdate"
         );
+        let mut written = 0usize;
         for chunk in ranges.chunks(50) {
             let data: Vec<serde_json::Value> = chunk
                 .iter()
@@ -108,13 +119,20 @@ impl SheetsApi {
                     "data": data,
                 }))
                 .send()
-                .map_err(|e| ApiError::Other(e.to_string()))?;
+                .map_err(|e| BatchUpdateError {
+                    written,
+                    cause: ApiError::Other(e.to_string()),
+                })?;
             if !resp.status().is_success() {
-                return Err(ApiError::Http {
-                    status: resp.status().as_u16(),
-                    body: resp.text().unwrap_or_default(),
+                return Err(BatchUpdateError {
+                    written,
+                    cause: ApiError::Http {
+                        status: resp.status().as_u16(),
+                        body: resp.text().unwrap_or_default(),
+                    },
                 });
             }
+            written += chunk.len();
         }
         Ok(())
     }

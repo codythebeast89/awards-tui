@@ -6,6 +6,7 @@ license.workspace = true
 description = "Pure awards parsing, indexing, and audit helpers"
 
 [dependencies]
+dirs = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -123,7 +123,7 @@ awards-tui --auth-status
 
 - Lookups use the public CSV export (no credentials required).
 - Add/edit/delete/rename use the Sheets API and require OAuth or a service account.
-- **Rename** rewrites every cell for a user (`OldName --rename NewName` or Actions → Rename / `n`), keeping suffixes like `x2` and `- detail`. Overlapping columns on the new name are refused.
+- **Rename** rewrites every cell for a user (`OldName --rename NewName` or Actions → Rename / `n`), keeping suffixes like `x2` and `- detail`. The new name must be a bare Roblox username. Overlapping columns on the live sheet are refused.
 - Delete clears the award cell and **shifts that column up** so no blank hole is left.
 - Award cells are written like `Username`, `Username x2`, or `Username - detail`.
 - Sheet row numbers include CSV→live offsets: Badges **+6**, Ribbons **+8**, Foreign Awards **+7**. When logged in, lookup reconciles mid-sheet lag against the live sheet.

@@ -3,9 +3,10 @@
 use crate::api::{a1, ApiError, SheetsApi};
 use awards_core::{
     build_cell_value, clean_cell, format_award_name, get_awards_for_username, match_row_in_window,
-    normalize_username, owned_award_columns, replace_username_in_cell, sheet_data_start_row, Award,
+    normalize_username, parse_bare_username, replace_username_in_cell, sheet_data_start_row, Award,
     AwardDef, AwardsData,
 };
+use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
 pub struct EditResult {
@@ -40,6 +41,15 @@ impl EditResult {
             message: message.into(),
             award: None,
             awards: Vec::new(),
+        }
+    }
+
+    fn err_partial(message: impl Into<String>, awards: Vec<Award>) -> Self {
+        Self {
+            ok: false,
+            message: message.into(),
+            award: awards.first().cloned(),
+            awards,
         }
     }
 }
@@ -341,6 +351,17 @@ pub fn remove_award(award: &Award, interactive_auth: bool) -> EditResult {
     )
 }
 
+/// First sheet row (1-based) in a column values window that belongs to `key`.
+fn column_row_for_username(col_vals: &[Vec<String>], data_start_row: i32, key: &str) -> Option<i32> {
+    for (i, row) in col_vals.iter().enumerate().skip((data_start_row - 1) as usize) {
+        let cell = row.first().map(|s| s.as_str()).unwrap_or("");
+        if normalize_username(Some(cell)).as_deref() == Some(key) {
+            return Some((i + 1) as i32);
+        }
+    }
+    None
+}
+
 /// Rewrite every cell owned by `old_username` to `new_username`, keeping suffixes.
 pub fn rename_username(
     old_username: &str,
@@ -351,10 +372,12 @@ pub fn rename_username(
     let Some(old_key) = normalize_username(Some(old_username)) else {
         return EditResult::err("Old username required");
     };
-    let display_new = new_username.trim().trim_start_matches('@');
-    let Some(new_key) = normalize_username(Some(display_new)) else {
-        return EditResult::err("New username must start with a Roblox-style name");
+    let Some(display_new) = parse_bare_username(new_username) else {
+        return EditResult::err(
+            "New username must be a bare Roblox name (letters, digits, underscore only)",
+        );
     };
+    let new_key = display_new.to_ascii_lowercase();
     if old_key == new_key {
         return EditResult::err("New username is the same as the current name");
     }
@@ -379,40 +402,52 @@ pub fn rename_username(
         return EditResult::err(format!("No sheet cells found for @{old_key}"));
     }
 
-    let existing_new = get_awards_for_username(&data.index, &new_key);
-    let new_owned = owned_award_columns(&existing_new, &new_key);
-    let overlaps: Vec<&Award> = awards
-        .iter()
-        .filter(|award| new_owned.contains(&(award.sheet.clone(), award.col.clone())))
-        .collect();
-    if !overlaps.is_empty() {
-        let sample = overlaps
-            .iter()
-            .take(5)
-            .map(|award| {
-                format!(
-                    "{} {}{}",
-                    if award.base_name.is_empty() {
-                        award.name.as_str()
-                    } else {
-                        award.base_name.as_str()
-                    },
-                    award.col,
-                    award.row
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        return EditResult::err(format!(
-            "@{new_key} already has {} overlapping award column(s) ({sample}). Resolve those first.",
-            overlaps.len()
-        ));
-    }
+    let existing_new_count = get_awards_for_username(&data.index, &new_key).len();
 
     let api = match SheetsApi::connect(interactive_auth) {
         Ok(api) => api,
         Err(err) => return EditResult::err(err.to_string()),
     };
+
+    // Live overlap check: refuse if the destination already owns any target column.
+    let mut columns: HashSet<(String, String)> = HashSet::new();
+    for award in &awards {
+        columns.insert((award.sheet.clone(), award.col.clone()));
+    }
+    let mut overlaps = Vec::new();
+    for (sheet, col) in columns {
+        let col_range = format!("'{sheet}'!{col}:{col}");
+        let col_vals = match api.get_values(&col_range) {
+            Ok(v) => v,
+            Err(err) => {
+                return EditResult::err(format!(
+                    "Could not re-read {sheet}!{col} before rename: {err}"
+                ));
+            }
+        };
+        let start = sheet_data_start_row(&sheet);
+        if let Some(row) = column_row_for_username(&col_vals, start, &new_key) {
+            let sample = awards
+                .iter()
+                .find(|a| a.sheet == sheet && a.col == col)
+                .map(|a| {
+                    if a.base_name.is_empty() {
+                        a.name.clone()
+                    } else {
+                        a.base_name.clone()
+                    }
+                })
+                .unwrap_or_else(|| format!("{col}{row}"));
+            overlaps.push(format!("{sample} {col}{row}"));
+        }
+    }
+    if !overlaps.is_empty() {
+        let count = overlaps.len();
+        let sample = overlaps.into_iter().take(5).collect::<Vec<_>>().join(", ");
+        return EditResult::err(format!(
+            "@{new_key} already has {count} overlapping award column(s) on the live sheet ({sample}). Resolve those first."
+        ));
+    }
 
     let mut writes: Vec<(String, Vec<Vec<String>>, Award)> = Vec::new();
     let mut skipped = 0usize;
@@ -435,7 +470,7 @@ pub fn rename_username(
             skipped += 1;
             continue;
         }
-        let Some(new_cell) = replace_username_in_cell(&live, display_new) else {
+        let Some(new_cell) = replace_username_in_cell(&live, &display_new) else {
             skipped += 1;
             continue;
         };
@@ -471,7 +506,22 @@ pub fn rename_username(
         .map(|(range, values, _)| (range.clone(), values.clone()))
         .collect();
     if let Err(err) = api.batch_update_values(payload) {
-        return EditResult::err(format!("Rename write failed: {err}"));
+        let written = err.written.min(writes.len());
+        let updated: Vec<Award> = writes
+            .into_iter()
+            .take(written)
+            .map(|(_, _, award)| award)
+            .collect();
+        if updated.is_empty() {
+            return EditResult::err(format!("Rename write failed: {err}"));
+        }
+        return EditResult::err_partial(
+            format!(
+                "Renamed {} cell(s) for @{old_key} → {display_new}, then write failed ({err}). Refresh and retry remaining cells.",
+                updated.len()
+            ),
+            updated,
+        );
     }
 
     let updated: Vec<Award> = writes.into_iter().map(|(_, _, award)| award).collect();
@@ -482,10 +532,9 @@ pub fn rename_username(
     if skipped > 0 {
         message.push_str(&format!(" · skipped {skipped} stale/moved"));
     }
-    if !existing_new.is_empty() {
+    if existing_new_count > 0 {
         message.push_str(&format!(
-            " · merged with {} existing @{new_key} award(s)",
-            existing_new.len()
+            " · merged with {existing_new_count} existing @{new_key} award(s)"
         ));
     }
     EditResult::ok_many(message, updated)
@@ -512,6 +561,39 @@ mod tests {
         assert!(msg.contains("C10"));
         assert!(msg.contains("alice"));
         assert!(msg.contains("bob"));
+    }
+
+    #[test]
+    fn column_row_for_username_finds_data_rows() {
+        let col_vals = vec![
+            vec!["Header".into()],
+            vec!["alice".into()],
+            vec!["bob x2".into()],
+            vec!["".into()],
+            vec!["carol - Master".into()],
+        ];
+        assert_eq!(
+            column_row_for_username(&col_vals, 2, "bob"),
+            Some(3)
+        );
+        assert_eq!(
+            column_row_for_username(&col_vals, 2, "carol"),
+            Some(5)
+        );
+        assert_eq!(column_row_for_username(&col_vals, 2, "nobody"), None);
+        // Header row is skipped when data starts at 2.
+        assert_eq!(column_row_for_username(&col_vals, 2, "header"), None);
+    }
+
+    #[test]
+    fn rename_rejects_non_bare_new_username() {
+        let result = rename_username("alice", "Bob - Master", None, false);
+        assert!(!result.ok);
+        assert!(
+            result.message.contains("bare Roblox name"),
+            "{}",
+            result.message
+        );
     }
 
     /// Live smoke: add then delete a throwaway row. Requires token.json / network.

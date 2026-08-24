@@ -20,6 +20,15 @@ fn test_normalize() {
 }
 
 #[test]
+fn test_user_agent_includes_package_version() {
+    assert!(
+        USER_AGENT.contains(env!("CARGO_PKG_VERSION")),
+        "USER_AGENT={USER_AGENT}"
+    );
+    assert!(USER_AGENT.starts_with("awards-tui/"));
+}
+
+#[test]
 fn test_usernames_similar() {
     assert!(usernames_similar("codythebeast89", "codythebast89"));
     assert!(!usernames_similar("codythebeast89", "totallydifferent"));
@@ -249,6 +258,21 @@ fn test_replace_username_in_cell() {
         Some("bob - Master  (x5 CJS)")
     );
     assert_eq!(replace_username_in_cell("", "Bob"), None);
+    assert_eq!(
+        replace_username_in_cell("Alice x2", "Bob - Master"),
+        None,
+        "refuse cell-like new usernames"
+    );
+    assert_eq!(replace_username_in_cell("Alice", "Bob x2"), None);
+}
+
+#[test]
+fn test_parse_bare_username() {
+    assert_eq!(parse_bare_username("Bob").as_deref(), Some("Bob"));
+    assert_eq!(parse_bare_username("@Nova_1").as_deref(), Some("Nova_1"));
+    assert_eq!(parse_bare_username("Bob - Master"), None);
+    assert_eq!(parse_bare_username("Alice x2"), None);
+    assert_eq!(parse_bare_username(""), None);
 }
 
 #[test]

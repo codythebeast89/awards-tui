@@ -116,6 +116,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 name = "awards-core"
 version = "2.1.0"
 dependencies = [
+ "dirs",
  "regex",
  "serde",
  "serde_json",
@@ -131,6 +132,7 @@ dependencies = [
  "chrono",
  "csv",
  "dirs",
+ "getrandom 0.2.17",
  "jsonwebtoken",
  "open",
  "reqwest",

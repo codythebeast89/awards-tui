@@ -2,8 +2,8 @@ use crate::config::AppConfig;
 use awards_core::{
     awards_excluding_duplicate_rows, col_to_index, collect_sheet_audit, find_duplicates_for_user,
     flatten_awards_sorted, format_audit_report, get_awards_for_username, normalize_username,
-    owned_award_columns, reindex_column_after_delete, row_offset, shift_column_up_in_rows,
-    upsert_award_in_index, Award, AwardDef, AwardsData, CATEGORY_LABELS,
+    owned_award_columns, parse_bare_username, reindex_column_after_delete, row_offset,
+    shift_column_up_in_rows, upsert_award_in_index, Award, AwardDef, AwardsData, CATEGORY_LABELS,
 };
 use awards_sheets::{
     add_award_to_user, auth_status, award_with_live_row, build_awards_data, project_root,
@@ -393,6 +393,20 @@ impl App {
     fn handle_write_done(&mut self, kind: &'static str, result: EditResult, username: String) {
         self.busy = false;
         if !result.ok {
+            if kind == "rename" && !result.awards.is_empty() {
+                // Partial batch write: apply cells that landed, then surface the error.
+                let message = format!("rename failed: {}", result.message);
+                self.apply_rename_result(
+                    EditResult {
+                        ok: false,
+                        message,
+                        award: result.award,
+                        awards: result.awards,
+                    },
+                    username,
+                );
+                return;
+            }
             self.status = format!("{kind} failed: {}", result.message);
             return;
         }
@@ -605,7 +619,8 @@ impl App {
                     RenameStep::Name => match key.code {
                         KeyCode::Enter => {
                             let raw = rename.input.value().trim();
-                            if let Some(new_key) = normalize_username(Some(raw)) {
+                            if let Some(display_new) = parse_bare_username(raw) {
+                                let new_key = display_new.to_ascii_lowercase();
                                 if new_key == rename.from {
                                     status = Some(
                                         "New username is the same as the current name".to_string(),
@@ -614,7 +629,9 @@ impl App {
                                     rename.step = RenameStep::Confirm;
                                 }
                             } else {
-                                status = Some("Enter the new Roblox username".to_string());
+                                status = Some(
+                                    "Enter a bare Roblox username (no suffixes)".to_string(),
+                                );
                             }
                         }
                         _ => {
@@ -647,7 +664,9 @@ impl App {
         }
         if let Some(Modal::Rename(rename)) = self.modal.as_mut() {
             if matches!(rename.step, RenameStep::Confirm) {
-                let new_key = normalize_username(Some(rename.input.value())).unwrap_or_default();
+                let new_key = parse_bare_username(rename.input.value())
+                    .map(|name| name.to_ascii_lowercase())
+                    .unwrap_or_default();
                 rename.existing_new = self
                     .data
                     .as_ref()
@@ -947,7 +966,8 @@ impl App {
         let tx = self.tx.clone();
         thread::spawn(move || {
             let result = rename_username(&old_username, &new_username, data.as_ref(), false);
-            let view_user = normalize_username(Some(&new_username))
+            let view_user = parse_bare_username(&new_username)
+                .map(|name| name.to_ascii_lowercase())
                 .unwrap_or_else(|| new_username.trim().trim_start_matches('@').to_string());
             let _ = tx.send(WorkerMsg::WriteDone {
                 kind: "rename",

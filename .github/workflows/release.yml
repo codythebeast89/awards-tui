@@ -10,7 +10,18 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test
+        run: cargo test --workspace --locked
+      - name: cargo clippy
+        run: cargo clippy --workspace --locked -- -D warnings
+
   build:
+    needs: test
     strategy:
       fail-fast: false
       matrix:

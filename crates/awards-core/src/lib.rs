@@ -25,7 +25,7 @@ pub use meta::{
 };
 pub use parse::{
     build_cell_value, cell_format_issues, clean_cell, find_first_empty_row, match_row_in_window,
-    normalize_username, replace_username_in_cell, usernames_similar,
+    normalize_username, parse_bare_username, replace_username_in_cell, usernames_similar,
 };
 pub use types::{Award, AwardDef, AwardsData, DuplicateHit};
 

@@ -50,6 +50,20 @@ pub fn normalize_username(cell: Option<&str>) -> Option<String> {
         .map(|c| c.get(1).unwrap().as_str().to_ascii_lowercase())
 }
 
+/// Parse a bare Roblox username (optional `@`, letters/digits/`_` only).
+///
+/// Rejects cell-style values like `Bob - Master` or `Alice x2`. Preserves case.
+pub fn parse_bare_username(input: &str) -> Option<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"^@?([A-Za-z0-9_]+)$").unwrap());
+    let text = clean_cell(Some(input));
+    if text.is_empty() {
+        return None;
+    }
+    re.captures(&text)
+        .map(|c| c.get(1).unwrap().as_str().to_string())
+}
+
 /// True when two usernames are likely the same person with a typo.
 pub fn usernames_similar(a: &str, b: &str) -> bool {
     if a.is_empty() || b.is_empty() || a == b {
@@ -95,18 +109,17 @@ pub fn cell_format_issues(cell: &str) -> Vec<String> {
 }
 
 /// Replace the leading username in a cell, keeping suffixes (`x2`, `- detail`).
+///
+/// `new_username` must be a bare Roblox name (no award suffixes).
 pub fn replace_username_in_cell(cell: &str, new_username: &str) -> Option<String> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"^@?([A-Za-z0-9_]+)").unwrap());
-    let new_user = new_username.trim().trim_start_matches('@');
-    if new_user.is_empty() || normalize_username(Some(new_user)).is_none() {
-        return None;
-    }
+    let new_user = parse_bare_username(new_username)?;
     let text = clean_cell(Some(cell));
     let caps = re.captures(&text)?;
     let rest = text[caps.get(0)?.end()..].trim_start();
     if rest.is_empty() {
-        Some(new_user.to_string())
+        Some(new_user)
     } else {
         Some(format!("{new_user} {rest}"))
     }
