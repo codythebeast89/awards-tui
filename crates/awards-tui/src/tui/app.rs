@@ -476,7 +476,14 @@ impl App {
                 patch_sheet_cell(data, award);
             }
             self.username = input_with_value(username.clone());
-            self.apply_user_view(&username, result.awards.first(), Some(result.message));
+            // On partial failure we keep viewing the old username; landed awards
+            // moved to the new key, so don't try to select one of them here.
+            let select = if result.ok {
+                result.awards.first()
+            } else {
+                None
+            };
+            self.apply_user_view(&username, select, Some(result.message));
         } else {
             self.status = result.message;
         }
@@ -966,9 +973,20 @@ impl App {
         let tx = self.tx.clone();
         thread::spawn(move || {
             let result = rename_username(&old_username, &new_username, data.as_ref(), false);
-            let view_user = parse_bare_username(&new_username)
-                .map(|name| name.to_ascii_lowercase())
-                .unwrap_or_else(|| new_username.trim().trim_start_matches('@').to_string());
+            // On failure (including partial), keep viewing the old username so
+            // remaining cells stay visible. Success jumps to the new name.
+            let view_user = if result.ok {
+                parse_bare_username(&new_username)
+                    .map(|name| name.to_ascii_lowercase())
+                    .unwrap_or_else(|| {
+                        new_username
+                            .trim()
+                            .trim_start_matches('@')
+                            .to_ascii_lowercase()
+                    })
+            } else {
+                old_username
+            };
             let _ = tx.send(WorkerMsg::WriteDone {
                 kind: "rename",
                 result,

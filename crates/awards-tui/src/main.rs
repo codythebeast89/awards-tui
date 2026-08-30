@@ -282,6 +282,16 @@ fn cmd_rename(old_username: &str, new_username: &str) -> anyhow::Result<ExitCode
     let data = build_awards_data(None)?;
     let result = rename_username(old_username, new_username, Some(&data), false);
     println!("{}", result.message);
+    if !result.ok && !result.awards.is_empty() {
+        println!(
+            "Landed {} cell(s) before failure:",
+            result.awards.len()
+        );
+        for award in &result.awards {
+            println!("  {}!{}{}", award.sheet, award.col, award.row);
+        }
+        println!("Retry the same rename to finish remaining cells.");
+    }
     Ok(if result.ok {
         ExitCode::SUCCESS
     } else {

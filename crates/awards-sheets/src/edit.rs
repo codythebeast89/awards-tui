@@ -6,7 +6,7 @@ use awards_core::{
     normalize_username, parse_bare_username, replace_username_in_cell, sheet_data_start_row, Award,
     AwardDef, AwardsData,
 };
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct EditResult {
@@ -351,15 +351,34 @@ pub fn remove_award(award: &Award, interactive_auth: bool) -> EditResult {
     )
 }
 
-/// First sheet row (1-based) in a column values window that belongs to `key`.
-fn column_row_for_username(col_vals: &[Vec<String>], data_start_row: i32, key: &str) -> Option<i32> {
+/// First sheet row owned by `key` that is **not** in `allowed_rows` (in-place rewrite targets).
+fn column_foreign_username(
+    col_vals: &[Vec<String>],
+    data_start_row: i32,
+    key: &str,
+    allowed_rows: &HashSet<i32>,
+) -> Option<i32> {
     for (i, row) in col_vals.iter().enumerate().skip((data_start_row - 1) as usize) {
+        let sheet_row = (i + 1) as i32;
+        if allowed_rows.contains(&sheet_row) {
+            continue;
+        }
         let cell = row.first().map(|s| s.as_str()).unwrap_or("");
         if normalize_username(Some(cell)).as_deref() == Some(key) {
-            return Some((i + 1) as i32);
+            return Some(sheet_row);
         }
     }
     None
+}
+
+fn format_remaining_ranges(ranges: &[String]) -> String {
+    const SHOW: usize = 8;
+    let sample = ranges.iter().take(SHOW).cloned().collect::<Vec<_>>().join(", ");
+    if ranges.len() > SHOW {
+        format!("{sample} +{} more", ranges.len() - SHOW)
+    } else {
+        sample
+    }
 }
 
 /// Rewrite every cell owned by `old_username` to `new_username`, keeping suffixes.
@@ -394,7 +413,7 @@ pub fn rename_username(
         },
     };
 
-    let mut awards: Vec<Award> = get_awards_for_username(&data.index, &old_key)
+    let awards: Vec<Award> = get_awards_for_username(&data.index, &old_key)
         .into_iter()
         .filter(|award| !award.sheet.is_empty() && !award.col.is_empty() && award.row != 0)
         .collect();
@@ -409,13 +428,22 @@ pub fn rename_username(
         Err(err) => return EditResult::err(err.to_string()),
     };
 
-    // Live overlap check: refuse if the destination already owns any target column.
-    let mut columns: HashSet<(String, String)> = HashSet::new();
-    for award in &awards {
-        columns.insert((award.sheet.clone(), award.col.clone()));
+    // Group by column so we fetch each column once (also needed for overlap + retry).
+    // BTreeMap keeps write / remaining-A1 order stable across runs.
+    let mut by_column: BTreeMap<(String, String), Vec<Award>> = BTreeMap::new();
+    for award in awards {
+        by_column
+            .entry((award.sheet.clone(), award.col.clone()))
+            .or_default()
+            .push(award);
     }
+
+    let mut writes: Vec<(String, Vec<Vec<String>>, Award)> = Vec::new();
+    let mut done_awards: Vec<Award> = Vec::new();
+    let mut skipped = 0usize;
     let mut overlaps = Vec::new();
-    for (sheet, col) in columns {
+
+    for ((sheet, col), group) in by_column {
         let col_range = format!("'{sheet}'!{col}:{col}");
         let col_vals = match api.get_values(&col_range) {
             Ok(v) => v,
@@ -425,11 +453,114 @@ pub fn rename_username(
                 ));
             }
         };
-        let start = sheet_data_start_row(&sheet);
-        if let Some(row) = column_row_for_username(&col_vals, start, &new_key) {
-            let sample = awards
-                .iter()
-                .find(|a| a.sheet == sheet && a.col == col)
+        let data_start = sheet_data_start_row(&sheet);
+        // Full-column fetch: values[0] is sheet row 1.
+        let col_start_row = 1i32;
+        let mut allowed_rows: HashSet<i32> = HashSet::new();
+        let mut pending: Vec<(String, Vec<Vec<String>>, Award)> = Vec::new();
+
+        for award in group {
+            let Some(expected_new) = replace_username_in_cell(&award.cell, &display_new) else {
+                skipped += 1;
+                continue;
+            };
+
+            if let Some(row) =
+                match_row_in_window(&col_vals, col_start_row, &award.cell, award.row)
+            {
+                let live = clean_cell(
+                    col_vals
+                        .get((row - col_start_row) as usize)
+                        .and_then(|r| r.first())
+                        .map(|s| s.as_str()),
+                );
+                if normalize_username(Some(&live)).as_deref() == Some(old_key.as_str()) {
+                    let Some(new_cell) = replace_username_in_cell(&live, &display_new) else {
+                        skipped += 1;
+                        continue;
+                    };
+                    if new_cell == live {
+                        let display = format_award_name(
+                            &award.category,
+                            Some(award.base_name.as_str()),
+                            &new_cell,
+                        )
+                        .unwrap_or_else(|| award.name.clone());
+                        done_awards.push(Award {
+                            category: award.category,
+                            name: display,
+                            sheet: award.sheet.clone(),
+                            col: award.col.clone(),
+                            row,
+                            cell: new_cell,
+                            base_name: award.base_name,
+                        });
+                        allowed_rows.insert(row);
+                        continue;
+                    }
+                    let display =
+                        format_award_name(&award.category, Some(award.base_name.as_str()), &new_cell)
+                            .unwrap_or_else(|| award.name.clone());
+                    let updated = Award {
+                        category: award.category,
+                        name: display,
+                        sheet: award.sheet.clone(),
+                        col: award.col.clone(),
+                        row,
+                        cell: new_cell.clone(),
+                        base_name: award.base_name,
+                    };
+                    allowed_rows.insert(row);
+                    pending.push((
+                        a1(&updated.sheet, &updated.col, updated.row),
+                        vec![vec![new_cell]],
+                        updated,
+                    ));
+                    continue;
+                }
+            }
+
+            // Retry / partial write: cell already holds the rewritten value.
+            if let Some(row) =
+                match_row_in_window(&col_vals, col_start_row, &expected_new, award.row)
+            {
+                let live = clean_cell(
+                    col_vals
+                        .get((row - col_start_row) as usize)
+                        .and_then(|r| r.first())
+                        .map(|s| s.as_str()),
+                );
+                if normalize_username(Some(&live)).as_deref() == Some(new_key.as_str()) {
+                    let display = format_award_name(
+                        &award.category,
+                        Some(award.base_name.as_str()),
+                        &live,
+                    )
+                    .unwrap_or_else(|| award.name.clone());
+                    done_awards.push(Award {
+                        category: award.category,
+                        name: display,
+                        sheet: award.sheet.clone(),
+                        col: award.col.clone(),
+                        row,
+                        cell: live,
+                        base_name: award.base_name,
+                    });
+                    allowed_rows.insert(row);
+                    continue;
+                }
+            }
+
+            skipped += 1;
+        }
+
+        if let Some(row) =
+            column_foreign_username(&col_vals, data_start, &new_key, &allowed_rows)
+        {
+            let sample_name = pending
+                .first()
+                .map(|(_, _, a)| a)
+                .or_else(|| done_awards.iter().rev().find(|a| a.sheet == sheet && a.col == col))
                 .map(|a| {
                     if a.base_name.is_empty() {
                         a.name.clone()
@@ -438,9 +569,12 @@ pub fn rename_username(
                     }
                 })
                 .unwrap_or_else(|| format!("{col}{row}"));
-            overlaps.push(format!("{sample} {col}{row}"));
+            overlaps.push(format!("{sample_name} {col}{row}"));
         }
+
+        writes.extend(pending);
     }
+
     if !overlaps.is_empty() {
         let count = overlaps.len();
         let sample = overlaps.into_iter().take(5).collect::<Vec<_>>().join(", ");
@@ -449,53 +583,16 @@ pub fn rename_username(
         ));
     }
 
-    let mut writes: Vec<(String, Vec<Vec<String>>, Award)> = Vec::new();
-    let mut skipped = 0usize;
-    for award in awards.drain(..) {
-        let live_row = match find_live_row(&api, &award, 24) {
-            Ok(Some(row)) => row,
-            Ok(None) => {
-                skipped += 1;
-                continue;
-            }
-            Err(err) => return EditResult::err(format!("Rename failed: {err}")),
-        };
-        let mut award = award;
-        award.row = live_row;
-        let live = match live_cell_value(&api, &award.sheet, &award.col, award.row) {
-            Ok(value) => value,
-            Err(err) => return EditResult::err(format!("Rename failed: {err}")),
-        };
-        if normalize_username(Some(&live)).as_deref() != Some(old_key.as_str()) {
-            skipped += 1;
-            continue;
-        }
-        let Some(new_cell) = replace_username_in_cell(&live, &display_new) else {
-            skipped += 1;
-            continue;
-        };
-        if new_cell == live {
-            continue;
-        }
-        let display = format_award_name(&award.category, Some(award.base_name.as_str()), &new_cell)
-            .unwrap_or_else(|| award.name.clone());
-        let updated = Award {
-            category: award.category,
-            name: display,
-            sheet: award.sheet.clone(),
-            col: award.col.clone(),
-            row: award.row,
-            cell: new_cell.clone(),
-            base_name: award.base_name,
-        };
-        writes.push((
-            a1(&updated.sheet, &updated.col, updated.row),
-            vec![vec![new_cell]],
-            updated,
-        ));
-    }
-
+    let already_done = done_awards.len();
     if writes.is_empty() {
+        if !done_awards.is_empty() {
+            return EditResult::ok_many(
+                format!(
+                    "@{old_key} → {display_new}: {already_done} cell(s) already updated on the live sheet"
+                ),
+                done_awards,
+            );
+        }
         return EditResult::err(format!(
             "No live cells still belonged to @{old_key}. Refresh and try again."
         ));
@@ -507,28 +604,42 @@ pub fn rename_username(
         .collect();
     if let Err(err) = api.batch_update_values(payload) {
         let written = err.written.min(writes.len());
-        let updated: Vec<Award> = writes
-            .into_iter()
-            .take(written)
-            .map(|(_, _, award)| award)
+        let remaining_ranges: Vec<String> = writes
+            .iter()
+            .skip(written)
+            .map(|(range, _, _)| range.clone())
             .collect();
+        let mut updated: Vec<Award> = done_awards;
+        updated.extend(
+            writes
+                .into_iter()
+                .take(written)
+                .map(|(_, _, award)| award),
+        );
         if updated.is_empty() {
             return EditResult::err(format!("Rename write failed: {err}"));
         }
+        let remaining = format_remaining_ranges(&remaining_ranges);
         return EditResult::err_partial(
             format!(
-                "Renamed {} cell(s) for @{old_key} → {display_new}, then write failed ({err}). Refresh and retry remaining cells.",
-                updated.len()
+                "Renamed {} cell(s) for @{old_key} → {display_new}, then write failed ({err}). Remaining {}: {}. Retry the same rename to finish.",
+                written,
+                remaining_ranges.len(),
+                remaining
             ),
             updated,
         );
     }
 
-    let updated: Vec<Award> = writes.into_iter().map(|(_, _, award)| award).collect();
+    let written_count = writes.len();
+    let mut updated: Vec<Award> = done_awards;
+    updated.extend(writes.into_iter().map(|(_, _, award)| award));
     let mut message = format!(
-        "Renamed @{old_key} → {display_new} in {} cell(s)",
-        updated.len()
+        "Renamed @{old_key} → {display_new} in {written_count} cell(s)"
     );
+    if already_done > 0 {
+        message.push_str(&format!(" · {already_done} already done"));
+    }
     if skipped > 0 {
         message.push_str(&format!(" · skipped {skipped} stale/moved"));
     }
@@ -564,25 +675,43 @@ mod tests {
     }
 
     #[test]
-    fn column_row_for_username_finds_data_rows() {
+    fn column_foreign_username_skips_allowed_rows() {
         let col_vals = vec![
             vec!["Header".into()],
             vec!["alice".into()],
             vec!["bob x2".into()],
-            vec!["".into()],
-            vec!["carol - Master".into()],
+            vec!["carol".into()],
         ];
+        let mut allowed = HashSet::new();
+        allowed.insert(3); // bob already rewritten in place
         assert_eq!(
-            column_row_for_username(&col_vals, 2, "bob"),
+            column_foreign_username(&col_vals, 2, "bob", &allowed),
+            None,
+            "in-place rewrite is not a foreign overlap"
+        );
+        assert_eq!(
+            column_foreign_username(&col_vals, 2, "carol", &allowed),
+            Some(4),
+            "other user in the column is still an overlap"
+        );
+        // With no allowed rows, bob at row 3 is foreign.
+        assert_eq!(
+            column_foreign_username(&col_vals, 2, "bob", &HashSet::new()),
             Some(3)
         );
-        assert_eq!(
-            column_row_for_username(&col_vals, 2, "carol"),
-            Some(5)
-        );
-        assert_eq!(column_row_for_username(&col_vals, 2, "nobody"), None);
         // Header row is skipped when data starts at 2.
-        assert_eq!(column_row_for_username(&col_vals, 2, "header"), None);
+        assert_eq!(
+            column_foreign_username(&col_vals, 2, "header", &HashSet::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn format_remaining_ranges_truncates() {
+        let ranges: Vec<String> = (1..=10).map(|i| format!("C{i}")).collect();
+        let text = format_remaining_ranges(&ranges);
+        assert!(text.contains("C1"));
+        assert!(text.contains("+2 more"));
     }
 
     #[test]
