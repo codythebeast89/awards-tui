@@ -29,11 +29,18 @@ Commits on `master` should be **GPG-signed** so GitHub shows them as Verified.
    git config --global user.signingkey <KEY_ID>
    git config --global commit.gpgsign true
    ```
-4. Confirm the commit email matches a verified GitHub email:
+4. Set author identity to match your GitHub account (name and a verified email):
    ```bash
+   git config --global user.name "Your GitHub Display Name"
    git config --global user.email you@example.com
    ```
 
-Older commits pushed before signing was enabled will remain unverified; only new signed commits get the badge.
+### Already pushed unsigned commits
+
+Commits pushed **before** signing was enabled stay **Unverified** on GitHub. That is expected — you do not need to rewrite history unless you specifically want a fully verified trail.
+
+Example on this repo: the `v2.3.0` release bump commits (`fce0746`, `7d73a40`) were pushed unsigned; the first Verified commit is `eb25743` (this guide). Re-signing old commits would require `git rebase` / amend and a force-push, which is usually not worth it.
+
+Only **new** signed commits get the Verified badge.
 
 If `gpg` prompts for a passphrase on every commit, use a GPG agent (for example `gpg-agent` with `pinentry`).
