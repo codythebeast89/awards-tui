@@ -18,7 +18,7 @@ python3 scripts/copy_and_populate_decorations.py
 # 3. Rebuild Profile without reference overlay; set service photo via IMAGE()
 python3 scripts/fix_profile_photo.py
 
-# 4. Sync checklists, conditional formatting, proof tab renames, Events Log shell
+# 4. Sync checklists, conditional formatting, proof tab renames
 python3 scripts/upgrade_qmc_tracker.py
 ```
 
@@ -32,10 +32,15 @@ bash scripts/run_qmc_tracker_upgrade.sh
 
 | Script | Purpose |
 |--------|---------|
-| `copy_reference_tabs.py` | `copyTo` Profile, Decorations, Events Log from reference |
+| `copy_reference_tabs.py` | `copyTo` Profile, Decorations from reference |
 | `copy_and_populate_decorations.py` | Replace badge/ribbon names with live awards list |
 | `fix_profile_photo.py` | Clear ocpstandard overlay; `IMAGE()` on merged C7:F22 |
 | `upgrade_qmc_tracker.py` | Profile fields, checklist sync, CF, proof renames |
+| `sync_proof_campaign.py` | Army Sea Duty deployments on Proof - Campaign tab |
+| `sync_proof_kosovo.py` | Kosovo Campaign deployments on Proof - Kosovo (link chips) |
+| `sync_proof_afghanistan.py` | Afghanistan Campaign on Proof - Afghanistan (link chips) |
+| `sync_proof_iraq.py` | Iraq Campaign on Proof - Iraq (4-deployment old cycle, link chips) |
+| `sync_proof_swa.py` | Southwest Asia Service on Proof - SWA Service (x1/x2 old cycle, x3 current) |
 | `analyze_tracker.py` | Read-only analysis → `audits/tracker-analysis-*.json` |
 | `rebuild_decorations_styled.py` | **Superseded** — prefer copy + populate approach |
 

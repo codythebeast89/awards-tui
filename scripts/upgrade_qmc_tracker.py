@@ -674,7 +674,7 @@ def main() -> int:
         return 1
     maps = json.loads(IMAGE_MAP_PATH.read_text()) if IMAGE_MAP_PATH.is_file() else {"badges": {}, "ribbons": {}, "foreign": {}}
     tok = load_token()
-    steps = sys.argv[1:] or ["profile", "sync", "format", "badges", "ribbons", "proof", "events"]
+    steps = sys.argv[1:] or ["profile", "sync", "format", "badges", "ribbons", "proof"]
     if "profile" in steps:
         print("1. Profile…")
         build_profile(tok)

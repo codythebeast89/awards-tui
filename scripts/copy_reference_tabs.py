@@ -28,7 +28,6 @@ REF_TABS = {
     "Profile": 1587421901,
     "Decorations - Badges": 913183075,
     "Decorations - Ribbons": 195347084,
-    "Events Log": 923035443,
 }
 
 PROFILE_UPDATES = {
@@ -135,7 +134,7 @@ def main() -> int:
         return 1
 
     tok = load_token()
-    tabs_to_copy = ["Profile", "Events Log"]
+    tabs_to_copy = ["Profile"]
     if not args.profile_only and not args.skip_decorations:
         tabs_to_copy += ["Decorations - Badges", "Decorations - Ribbons"]
 
