@@ -12,7 +12,9 @@ token.json
 service_account.json
 service-account.json
 *.pem
-audits/
+audits/*
+!audits/QMC-TRACKER-UPGRADE-GUIDE.md
+!audits/image-map.json
 audit-*.txt
 
 # Rust
