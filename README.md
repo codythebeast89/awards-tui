@@ -132,6 +132,8 @@ awards-tui --auth-status
 
 ## Development
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for test/clippy expectations and GPG-signed commit setup.
+
 ```bash
 cargo test --workspace
 cargo clippy --workspace -- -D warnings
