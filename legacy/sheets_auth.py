@@ -7,7 +7,10 @@ from pathlib import Path
 
 # Repo root — credentials stay next to award_columns.json, not under legacy/.
 ROOT = Path(__file__).resolve().parent.parent
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive.readonly",
+]
 CREDENTIALS_CANDIDATES = (
     ROOT / "credentials.json",
     ROOT / "client_secret.json",
