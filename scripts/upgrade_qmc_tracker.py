@@ -650,22 +650,29 @@ def build_decorations_ribbons(tok: dict, maps: dict, force: bool = False):
 
 
 def rename_sheets(tok: dict):
-    renames = {"OSB": "Proof - Overseas Bar", "JSA / Deployments": "Proof - JSA", "Army Sea Duty": "Proof - Campaign"}
+    renames = {
+        "OSB": "Proof - Overseas Bar",
+        "JSA / Deployments": "Proof - JSA",
+        "Army Sea Duty": "Proof - ASD",
+    }
     reqs = []
     for old, new in renames.items():
         if old in SHEET_IDS:
             reqs.append({"updateSheetProperties": {"properties": {"sheetId": SHEET_IDS[old], "title": new}, "fields": "title"}})
+    meta = sheets_api(tok, "?fields=sheets(properties(sheetId,title))")
+    for sheet in meta.get("sheets", []):
+        props = sheet["properties"]
+        if props["title"] == "Proof - Campaign":
+            reqs.append(
+                {
+                    "updateSheetProperties": {
+                        "properties": {"sheetId": props["sheetId"], "title": "Proof - ASD"},
+                        "fields": "title",
+                    }
+                }
+            )
     if reqs:
         batch_update(tok, reqs)
-
-
-def add_events_log(tok: dict):
-    if sheet_exists(tok, "Events Log"):
-        return
-    sid = add_sheet(tok, "Events Log")
-    merge(tok, sid, 3, 4, 2, 6)
-    update_range(tok, sid, 3, 2, [[cell("Events Log", "#980000", "#f4cccc", True, 15)]])
-    update_range(tok, sid, 6, 2, [[cell(h, "#666666", "#b7b7b7", True) for h in ["Date", "Event", "Host", "Attendance", "Notes", "Proof Link"]]])
 
 
 def main() -> int:
@@ -700,9 +707,6 @@ def main() -> int:
     if "proof" in steps:
         print("6. Proof renames…")
         rename_sheets(tok)
-    if "events" in steps:
-        print("7. Events Log…")
-        add_events_log(tok)
     print(f"Done: https://docs.google.com/spreadsheets/d/{USER_SHEET}/edit")
     return 0
 

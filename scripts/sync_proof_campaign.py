@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Sync Proof - Campaign (Army Sea Duty) tab from campaign tracker docs.
+"""Sync Proof - ASD (Army Sea Duty) tab from campaign tracker docs.
 
 Callers: `python3 scripts/sync_proof_campaign.py`
-API: Google Sheets values batchUpdate on USER_SHEET Proof - Campaign tab.
+API: Google Sheets values batchUpdate on USER_SHEET Proof - ASD tab.
 Schema: rows Name | Number | Date | Week | Status | Link (HYPERLINK to AAR docs).
 """
 
@@ -151,7 +151,7 @@ def batch_update_values(tok: dict, rows: list[list[str]]) -> None:
 def main() -> int:
     rows = build_rows()
     batch_update_values(load_token(), rows)
-    print(f"Updated Proof - Campaign with {len(rows) - 1} Army Sea Duty deployments")
+    print(f"Updated Proof - ASD with {len(rows) - 1} Army Sea Duty deployments")
     return 0
 
 
