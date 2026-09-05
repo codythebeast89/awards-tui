@@ -329,7 +329,7 @@ fn cmd_grant(username: &str, award_query: &str) -> anyhow::Result<ExitCode> {
     match verdict {
         AssistVerdict::Approve { grant, .. } => {
             let GrantPlan::UpgradeCell { new_cell, .. } = &grant;
-            let Some(target) = find_grant_target(&awards, &grant) else {
+            let Some(target) = find_grant_target(&awards, &grant, username) else {
                 eprintln!("Could not find the sheet row to upgrade.");
                 return Ok(ExitCode::from(1));
             };

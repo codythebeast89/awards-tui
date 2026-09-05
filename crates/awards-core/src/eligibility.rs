@@ -3,7 +3,7 @@
 //! Pure logic over an in-memory award list — no Sheets or Discord I/O.
 //! Master combat badges (MCAB / MCIB / MCMB): expert badge + combat badge → `- MC`.
 
-use crate::parse::{build_cell_value, clean_cell};
+use crate::parse::{build_cell_value, clean_cell, normalize_username};
 use crate::types::Award;
 
 /// Known clerk request kinds with prerequisite rules.
@@ -254,17 +254,33 @@ fn name_eq(award: &Award, want: &str) -> bool {
     award.name.eq_ignore_ascii_case(want)
 }
 
-fn cell_has_tag(cell: &str, tag: &str) -> bool {
-    let upper = cell.to_ascii_uppercase();
-    let tag = tag.to_ascii_uppercase();
-    upper.contains(&format!(" - {tag}")) || upper.ends_with(&format!(" {tag}"))
+/// Tokens in the detail segment after ` - ` (e.g. `User - MC x2` → `["MC", "X2"]`).
+fn cell_detail_tokens(cell: &str) -> Vec<String> {
+    let text = clean_cell(Some(cell));
+    let Some(dash) = text.find(" - ") else {
+        return Vec::new();
+    };
+    text[dash + 3..]
+        .split(|c: char| c.is_whitespace() || c == ',' || c == '/')
+        .filter(|t| !t.is_empty())
+        .map(|t| t.trim_matches(|c: char| c == '(' || c == ')').to_ascii_uppercase())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+fn cell_has_exact_tag(cell: &str, tag: &str) -> bool {
+    let want = tag.trim().to_ascii_uppercase();
+    if want.is_empty() {
+        return false;
+    }
+    cell_detail_tokens(cell).iter().any(|t| t == &want)
 }
 
 fn has_expert_badge(awards: &[Award], rule: &MasterCombatRule) -> bool {
     awards.iter().any(|a| {
         base_eq(a, rule.expert_base)
             || name_eq(a, rule.expert_base)
-            || cell_has_tag(&a.cell, rule.expert_cell_tag)
+            || cell_has_exact_tag(&a.cell, rule.expert_cell_tag)
     })
 }
 
@@ -281,7 +297,22 @@ fn is_master_on_combat(award: &Award, display_name: &str) -> bool {
             .name
             .to_ascii_lowercase()
             .starts_with(&display_name.to_ascii_lowercase())
-        || cell_has_tag(&award.cell, "MC")
+        || cell_has_exact_tag(&award.cell, "MC")
+}
+
+/// A combat-column row that can be upgraded to Master (not already Master, not an expert-only tag).
+fn is_grantable_combat(award: &Award, rule: &MasterCombatRule) -> bool {
+    if !base_eq(award, rule.combat_base) {
+        return false;
+    }
+    if is_master_on_combat(award, rule.award.display_name()) {
+        return false;
+    }
+    // `user - ESB` on the CAB column proves expert, not a grantable combat badge.
+    if cell_has_exact_tag(&award.cell, rule.expert_cell_tag) {
+        return false;
+    }
+    true
 }
 
 /// Check eligibility for a clerk assist request against the user's awards.
@@ -330,6 +361,12 @@ fn check_master_combat(
         };
     }
 
+    let grantable: Vec<&Award> = rows
+        .iter()
+        .copied()
+        .filter(|a| is_grantable_combat(a, &rule))
+        .collect();
+
     let mut missing = Vec::new();
     if !has_expert_badge(awards, &rule) {
         missing.push(format!(
@@ -337,7 +374,7 @@ fn check_master_combat(
             rule.expert_base, rule.expert_short
         ));
     }
-    if rows.is_empty() {
+    if grantable.is_empty() {
         missing.push(format!(
             "Missing {} ({})",
             rule.combat_base, rule.combat_short
@@ -372,10 +409,24 @@ fn check_master_combat(
         };
     }
 
-    let sheet_user = rows
-        .first()
-        .map(|a| sheet_username_display(&a.cell, username))
-        .unwrap_or_else(|| username.to_string());
+    if grantable.len() > 1 {
+        return AssistVerdict::Deny {
+            award: rule.award,
+            reasons: vec![format!(
+                "Multiple {} rows found; resolve duplicates before granting Master",
+                rule.combat_base
+            )],
+            denial_message: format!(
+                "Resolve duplicate {} entries before requesting {}.",
+                rule.combat_short,
+                rule.award.short_name()
+            ),
+            reminders,
+        };
+    }
+
+    let target = grantable[0];
+    let sheet_user = sheet_username_display(&target.cell, username);
     let new_cell = build_cell_value(&sheet_user, "MC");
     AssistVerdict::Approve {
         award: rule.award,
@@ -388,11 +439,35 @@ fn check_master_combat(
 }
 
 /// Find the sheet award to upgrade for a [`GrantPlan::UpgradeCell`].
-pub fn find_grant_target<'a>(awards: &'a [Award], plan: &GrantPlan) -> Option<&'a Award> {
+///
+/// Only returns a row owned by `username` (normalized), preferring a grantable
+/// non-Master combat cell.
+pub fn find_grant_target<'a>(
+    awards: &'a [Award],
+    plan: &GrantPlan,
+    username: &str,
+) -> Option<&'a Award> {
+    let want_user = normalize_username(Some(username))?;
     match plan {
-        GrantPlan::UpgradeCell { base_name, .. } => awards
-            .iter()
-            .find(|a| a.base_name.eq_ignore_ascii_case(base_name)),
+        GrantPlan::UpgradeCell { base_name, .. } => {
+            let owned: Vec<&'a Award> = awards
+                .iter()
+                .filter(|a| {
+                    a.base_name.eq_ignore_ascii_case(base_name)
+                        && normalize_username(Some(&a.cell)).as_deref() == Some(want_user.as_str())
+                })
+                .collect();
+            owned
+                .iter()
+                .copied()
+                .find(|a| {
+                    !cell_has_exact_tag(&a.cell, "MC")
+                        && !cell_has_exact_tag(&a.cell, "ESB")
+                        && !cell_has_exact_tag(&a.cell, "EIB")
+                        && !cell_has_exact_tag(&a.cell, "EFMB")
+                })
+                .or_else(|| owned.first().copied())
+        }
     }
 }
 
@@ -525,5 +600,77 @@ mod tests {
             award("Combat Medical Badge", "Combat Medical Badge", "MedicOne"),
         ];
         assert!(check_assist("MedicOne", &awards, "Master CMB").approved());
+    }
+
+    #[test]
+    fn esb_only_on_cab_column_is_not_grantable_combat() {
+        let awards = vec![award(
+            "Combat Action Badge",
+            "Expert Soldier Badge",
+            "alice - ESB",
+        )];
+        let v = check_assist("alice", &awards, "MCAB");
+        match v {
+            AssistVerdict::Deny { reasons, .. } => {
+                assert!(reasons.iter().any(|r| r.contains("Combat Action")));
+            }
+            other => panic!("expected Deny missing CAB, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mcab_substring_does_not_count_as_master() {
+        let awards = vec![
+            award("Expert Soldier Badge", "Expert Soldier Badge", "bob"),
+            award("Combat Action Badge", "Combat Action Badge", "bob - MCAB"),
+        ];
+        // "MCAB" must not be treated as exact tag "MC"
+        assert!(
+            check_assist("bob", &awards, "MCAB").approved(),
+            "bob - MCAB should still be grantable, not AlreadyHas"
+        );
+    }
+
+    #[test]
+    fn grant_target_ignores_similar_username_neighbor() {
+        let alice_awards = vec![
+            award("Expert Soldier Badge", "Expert Soldier Badge", "alice"),
+            award("Combat Action Badge", "Combat Action Badge", "alice"),
+        ];
+        let v = check_assist("alice", &alice_awards, "MCAB");
+        let AssistVerdict::Approve { grant, .. } = v else {
+            panic!("expected Approve for alice-only awards");
+        };
+        let mixed = vec![
+            award("Combat Action Badge", "Combat Action Badge", "alice"),
+            award("Combat Action Badge", "Combat Action Badge", "alicee"),
+        ];
+        let target = find_grant_target(&mixed, &grant, "alice").expect("alice CAB");
+        assert_eq!(target.cell, "alice");
+        assert!(find_grant_target(
+            &[award(
+                "Combat Action Badge",
+                "Combat Action Badge",
+                "alicee"
+            )],
+            &grant,
+            "alice"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn multiple_grantable_combat_rows_denied() {
+        let awards = vec![
+            award("Expert Soldier Badge", "Expert Soldier Badge", "dup"),
+            award("Combat Action Badge", "Combat Action Badge", "dup"),
+            award("Combat Action Badge", "Combat Action Badge", "dup x2"),
+        ];
+        // second row: "dup x2" normalizes to dup — two grantable CAB rows
+        let v = check_assist("dup", &awards, "MCAB");
+        assert!(
+            matches!(v, AssistVerdict::Deny { .. }),
+            "expected Deny for duplicate CAB rows, got {v:?}"
+        );
     }
 }

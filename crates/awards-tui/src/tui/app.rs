@@ -993,6 +993,13 @@ impl App {
         }));
     }
 
+    fn assist_awards_for_user(&self, username: &str) -> Vec<Award> {
+        self.data
+            .as_ref()
+            .map(|data| get_awards_for_username(&data.index, username))
+            .unwrap_or_default()
+    }
+
     fn run_assist_check(&mut self) {
         let Some(Modal::Assist(assist)) = self.modal.as_mut() else {
             return;
@@ -1003,20 +1010,8 @@ impl App {
             return;
         }
         let username = assist.username.clone();
-        let awards: Vec<Award> = self
-            .results
-            .iter()
-            .chain(self.duplicates.iter())
-            .cloned()
-            .collect();
-        let awards = if awards.is_empty() {
-            self.data
-                .as_ref()
-                .map(|data| get_awards_for_username(&data.index, &username))
-                .unwrap_or_default()
-        } else {
-            awards
-        };
+        // Index-only: never mix similar-username duplicate rows into Assist.
+        let awards = self.assist_awards_for_user(&username);
         let verdict = check_assist(&username, &awards, &query);
         let report = verdict.format_report(&username);
         let (can_grant, grant) = match &verdict {
@@ -1038,34 +1033,42 @@ impl App {
     }
 
     fn commit_assist_grant(&mut self) {
-        let Some(Modal::Assist(assist)) = self.modal.take() else {
+        let Some(Modal::Assist(assist)) = self.modal.as_mut() else {
             return;
         };
-        let Some(grant) = assist.grant else {
+        let username = assist.username.clone();
+        let query = assist.input.value().trim().to_string();
+        if query.is_empty() {
             self.status = "Nothing to grant".to_string();
             return;
-        };
-        let username = assist.username;
-        let awards: Vec<Award> = self
-            .results
-            .iter()
-            .chain(self.duplicates.iter())
-            .cloned()
-            .collect();
-        let awards = if awards.is_empty() {
-            self.data
-                .as_ref()
-                .map(|data| get_awards_for_username(&data.index, &username))
-                .unwrap_or_default()
-        } else {
-            awards
-        };
-        let GrantPlan::UpgradeCell { new_cell, .. } = &grant;
-        let Some(target) = find_grant_target(&awards, &grant).cloned() else {
-            self.status = "Could not find the sheet row to upgrade".to_string();
-            return;
-        };
-        self.commit_edit(target, new_cell.clone());
+        }
+        // Re-check on current index snapshot (closes TOCTOU vs cached Approve).
+        let awards = self.assist_awards_for_user(&username);
+        let verdict = check_assist(&username, &awards, &query);
+        match verdict {
+            AssistVerdict::Approve { grant, .. } => {
+                let GrantPlan::UpgradeCell { new_cell, .. } = &grant;
+                let Some(target) = find_grant_target(&awards, &grant, &username).cloned() else {
+                    self.modal = None;
+                    self.status =
+                        "Could not find a sheet row owned by this user to upgrade".to_string();
+                    return;
+                };
+                self.modal = None;
+                self.commit_edit(target, new_cell.clone());
+            }
+            other => {
+                let report = other.format_report(&username);
+                if let Some(Modal::Assist(assist)) = self.modal.as_mut() {
+                    assist.report = report;
+                    assist.can_grant = false;
+                    assist.grant = None;
+                    assist.step = AssistStep::Result;
+                    assist.scroll = 0;
+                }
+                self.status = "No longer eligible — see Assist result".to_string();
+            }
+        }
     }
 
     fn commit_add(&mut self, award_def: AwardDef, suffix: String) {
