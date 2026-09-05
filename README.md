@@ -81,6 +81,7 @@ Purple dark layout: username bar, fixed **Actions** pane, tabbed **Awards** list
 | e | Edit selected award cell |
 | d | Delete selected award (type `delete` to confirm) |
 | n | Rename current user across all sheet cells (type `rename` to confirm) |
+| c / Assist | Clerk assist: check award request (MCAB/MCIB/MCMB); Enter to grant if eligible |
 | F5 / Ctrl+R | Refresh sheet data |
 | Tab | Cycle focus |
 | Ctrl+Q | Quit |
@@ -115,6 +116,10 @@ awards-tui SomeUsername --add "Army Service" --suffix "x2"
 awards-tui SomeUsername --edit "Army Service" --cell "SomeUsername x2"
 awards-tui SomeUsername --delete "Army Service"
 awards-tui OldUsername --rename NewUsername
+awards-tui MaoZhuuDong --check MCAB
+awards-tui MaoZhuuDong --grant MCAB
+awards-tui SomeUser --check MCIB
+awards-tui SomeUser --grant MCMB
 awards-tui --login
 awards-tui --auth-status
 ```
@@ -123,6 +128,7 @@ awards-tui --auth-status
 
 - Lookups use the public CSV export (no credentials required).
 - Add/edit/delete/rename use the Sheets API and require OAuth or a service account.
+- **Clerk Assist** (`--check` / `--grant`, or Actions → Assist / `c`): eligibility for master combat badges (**MCAB**←ESB+CAB, **MCIB**←EIB+CIB, **MCMB**←EFMB+CMB). Prints Discord reminders; `--grant` / Enter writes the sheet. You still forward/deny in Discord yourself.
 - **Rename** rewrites every cell for a user (`OldName --rename NewName` or Actions → Rename / `n`), keeping suffixes like `x2` and `- detail`. The new name must be a bare Roblox username. Overlapping columns on the live sheet are refused.
 - Delete clears the award cell and **shifts that column up** so no blank hole is left.
 - Award cells are written like `Username`, `Username x2`, or `Username - detail`.

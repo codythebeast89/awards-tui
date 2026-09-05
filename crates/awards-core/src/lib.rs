@@ -2,6 +2,7 @@
 //! Ported from the Python `awards.py` module (offline logic only).
 
 mod audit;
+mod eligibility;
 mod format;
 mod index;
 mod meta;
@@ -9,6 +10,10 @@ mod parse;
 mod types;
 
 pub use audit::{collect_sheet_audit, format_audit_report, AuditReport};
+pub use eligibility::{
+    check_assist, find_grant_target, parse_assist_award, AssistAward, AssistReminders,
+    AssistVerdict, GrantPlan,
+};
 pub use format::{
     attach_cjs, cjs_phrase, expand_badge_abbrev, extract_cjs, format_award_name,
     format_badge_award, format_ribbon_award, ordinal_award,

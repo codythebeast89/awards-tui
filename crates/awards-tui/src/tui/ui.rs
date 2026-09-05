@@ -1,8 +1,8 @@
 use crate::{
     config::Theme,
     tui::app::{
-        category_label, AddStep, App, AuditModal, AwardTab, FocusArea, Modal, RenameStep,
-        VisibleAward,
+        category_label, AddStep, App, AssistStep, AuditModal, AwardTab, FocusArea, Modal,
+        RenameStep, VisibleAward,
     },
 };
 use awards_core::{normalize_username, AwardDef};
@@ -252,7 +252,7 @@ fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme) {
 fn render_footer(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     frame.render_widget(
         Paragraph::new(
-            "Ctrl+Q quit · Tab focus · Enter/e edit · d delete · a add · n rename · Audit · F5 · [ ] tabs",
+            "Ctrl+Q quit · Tab focus · Enter/e edit · d delete · a add · n rename · c assist · Audit · F5 · [ ] tabs",
         )
         .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
         area,
@@ -269,6 +269,10 @@ fn render_modal(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme)
             centered_rect(74, 14, area)
         }
         Some(Modal::Rename(_)) => centered_rect(70, 12, area),
+        Some(Modal::Assist(assist)) if matches!(assist.step, AssistStep::Result) => {
+            centered_rect(78, 22, area)
+        }
+        Some(Modal::Assist(_)) => centered_rect(70, 11, area),
         Some(Modal::Audit(_)) => centered_rect(100, 30, area),
         None => return,
     };
@@ -278,6 +282,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme)
         Some(Modal::Edit(edit)) => render_edit_modal(frame, edit, modal_area, theme),
         Some(Modal::Delete(delete)) => render_delete_modal(frame, delete, modal_area, theme),
         Some(Modal::Rename(rename)) => render_rename_modal(frame, rename, modal_area, theme),
+        Some(Modal::Assist(assist)) => render_assist_modal(frame, assist, modal_area, theme),
         Some(Modal::Audit(audit)) => render_audit_modal(frame, audit, modal_area, theme),
         None => {}
     }
@@ -612,6 +617,82 @@ fn render_rename_modal(
                 Paragraph::new("Enter rename · Esc cancel")
                     .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
                 chunks[3],
+            );
+        }
+    }
+}
+
+fn render_assist_modal(
+    frame: &mut Frame<'_>,
+    assist: &crate::tui::app::AssistModal,
+    area: Rect,
+    theme: &Theme,
+) {
+    let title = match assist.step {
+        AssistStep::Query => " Clerk Assist ",
+        AssistStep::Result => " Clerk Assist Result ",
+    };
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .style(Style::default().fg(theme.text).bg(theme.panel_alt))
+        .border_style(theme.purple);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    match assist.step {
+        AssistStep::Query => {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(2),
+                    Constraint::Length(3),
+                    Constraint::Length(1),
+                ])
+                .split(inner);
+            frame.render_widget(
+                Paragraph::new(format!("User @{}
+Requested award (e.g. MCAB)", assist.username))
+                    .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
+                chunks[0],
+            );
+            render_text_input(
+                frame,
+                chunks[1],
+                &assist.input,
+                Style::default().fg(theme.text).bg(theme.input_bg),
+                Block::default()
+                    .title(" award ")
+                    .borders(Borders::ALL)
+                    .border_style(theme.purple),
+                true,
+            );
+            frame.render_widget(
+                Paragraph::new("Enter check · Esc cancel")
+                    .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
+                chunks[2],
+            );
+        }
+        AssistStep::Result => {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(1)])
+                .split(inner);
+            let hint = if assist.can_grant {
+                "Enter grant on sheet · Esc cancel · j/k scroll"
+            } else {
+                "Esc close · j/k scroll"
+            };
+            frame.render_widget(
+                Paragraph::new(assist.report.as_str())
+                    .style(Style::default().fg(theme.text).bg(theme.panel_alt))
+                    .scroll((assist.scroll, 0))
+                    .wrap(Wrap { trim: false }),
+                chunks[0],
+            );
+            frame.render_widget(
+                Paragraph::new(hint).style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
+                chunks[1],
             );
         }
     }

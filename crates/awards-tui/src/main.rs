@@ -1,6 +1,6 @@
 use awards_core::{
-    collect_sheet_audit, format_audit_report, get_awards_for_username, group_awards,
-    CATEGORY_LABELS,
+    check_assist, collect_sheet_audit, find_grant_target, format_audit_report,
+    get_awards_for_username, group_awards, AssistVerdict, GrantPlan, CATEGORY_LABELS,
 };
 use awards_sheets::{
     add_award_to_user, auth_status, build_awards_data, credentials_path, login, project_root,
@@ -60,6 +60,14 @@ struct Cli {
     /// Rewrite USERNAME to NEW across every matching sheet cell.
     #[arg(long, value_name = "NEW")]
     rename: Option<String>,
+
+    /// Clerk assist: check eligibility for AWARD (MCAB / MCIB / MCMB). Read-only.
+    #[arg(long, value_name = "AWARD")]
+    check: Option<String>,
+
+    /// Clerk assist: if eligible, grant AWARD (e.g. MCAB → CAB cell `- MC`).
+    #[arg(long, value_name = "AWARD")]
+    grant: Option<String>,
 
     /// Optional cell suffix when using --add (e.g. x2).
     #[arg(long, default_value = "")]
@@ -299,6 +307,46 @@ fn cmd_rename(old_username: &str, new_username: &str) -> anyhow::Result<ExitCode
     })
 }
 
+fn cmd_check(username: &str, award_query: &str) -> anyhow::Result<ExitCode> {
+    eprintln!("Syncing awards…");
+    let data = build_awards_data(None)?;
+    let awards = get_awards_for_username(&data.index, username);
+    let verdict = check_assist(username, &awards, award_query);
+    println!("{}", verdict.format_report(username));
+    Ok(match &verdict {
+        AssistVerdict::Approve { .. } => ExitCode::SUCCESS,
+        AssistVerdict::AlreadyHas { .. } => ExitCode::SUCCESS,
+        AssistVerdict::Deny { .. } | AssistVerdict::Unknown { .. } => ExitCode::from(1),
+    })
+}
+
+fn cmd_grant(username: &str, award_query: &str) -> anyhow::Result<ExitCode> {
+    eprintln!("Syncing awards…");
+    let data = build_awards_data(None)?;
+    let awards = get_awards_for_username(&data.index, username);
+    let verdict = check_assist(username, &awards, award_query);
+    println!("{}", verdict.format_report(username));
+    match verdict {
+        AssistVerdict::Approve { grant, .. } => {
+            let GrantPlan::UpgradeCell { new_cell, .. } = &grant;
+            let Some(target) = find_grant_target(&awards, &grant) else {
+                eprintln!("Could not find the sheet row to upgrade.");
+                return Ok(ExitCode::from(1));
+            };
+            eprintln!("Writing {}!{}{} → {new_cell}…", target.sheet, target.col, target.row);
+            let result = update_award_cell(target, new_cell, false);
+            println!("{}", result.message);
+            Ok(if result.ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            })
+        }
+        AssistVerdict::AlreadyHas { .. } => Ok(ExitCode::SUCCESS),
+        AssistVerdict::Deny { .. } | AssistVerdict::Unknown { .. } => Ok(ExitCode::from(1)),
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -310,6 +358,32 @@ fn main() -> ExitCode {
     }
     if cli.audit || cli.audit_out.is_some() {
         return match cmd_audit(cli.audit_out) {
+            Ok(code) => code,
+            Err(err) => {
+                eprintln!("{err:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if let Some(award) = cli.check.as_deref() {
+        let Some(username) = cli.username.as_deref() else {
+            eprintln!("username is required with --check");
+            return ExitCode::from(2);
+        };
+        return match cmd_check(username, award) {
+            Ok(code) => code,
+            Err(err) => {
+                eprintln!("{err:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if let Some(award) = cli.grant.as_deref() {
+        let Some(username) = cli.username.as_deref() else {
+            eprintln!("username is required with --grant");
+            return ExitCode::from(2);
+        };
+        return match cmd_grant(username, award) {
             Ok(code) => code,
             Err(err) => {
                 eprintln!("{err:#}");

@@ -1,9 +1,10 @@
 use crate::config::AppConfig;
 use awards_core::{
-    awards_excluding_duplicate_rows, col_to_index, collect_sheet_audit, find_duplicates_for_user,
-    flatten_awards_sorted, format_audit_report, get_awards_for_username, normalize_username,
-    owned_award_columns, parse_bare_username, reindex_column_after_delete, row_offset,
-    shift_column_up_in_rows, upsert_award_in_index, Award, AwardDef, AwardsData, CATEGORY_LABELS,
+    awards_excluding_duplicate_rows, check_assist, col_to_index, collect_sheet_audit,
+    find_duplicates_for_user, find_grant_target, flatten_awards_sorted, format_audit_report,
+    get_awards_for_username, normalize_username, owned_award_columns, parse_bare_username,
+    reindex_column_after_delete, row_offset, shift_column_up_in_rows, upsert_award_in_index,
+    AssistVerdict, Award, AwardDef, AwardsData, CATEGORY_LABELS, GrantPlan,
 };
 use awards_sheets::{
     add_award_to_user, auth_status, award_with_live_row, build_awards_data, project_root,
@@ -24,6 +25,7 @@ const ACTIONS: &[Action] = &[
     Action::Edit,
     Action::Delete,
     Action::Rename,
+    Action::Assist,
     Action::Refresh,
     Action::Audit,
 ];
@@ -67,6 +69,7 @@ pub enum Action {
     Edit,
     Delete,
     Rename,
+    Assist,
     Refresh,
     Audit,
 }
@@ -79,6 +82,7 @@ impl Action {
             Self::Edit => "Edit",
             Self::Delete => "Delete",
             Self::Rename => "Rename",
+            Self::Assist => "Assist",
             Self::Refresh => "Refresh",
             Self::Audit => "Audit",
         }
@@ -135,7 +139,25 @@ pub enum Modal {
     Edit(EditModal),
     Delete(DeleteModal),
     Rename(RenameModal),
+    Assist(AssistModal),
     Audit(AuditModal),
+}
+
+#[derive(Debug)]
+pub enum AssistStep {
+    Query,
+    Result,
+}
+
+#[derive(Debug)]
+pub struct AssistModal {
+    pub username: String,
+    pub input: Input,
+    pub step: AssistStep,
+    pub report: String,
+    pub can_grant: bool,
+    pub grant: Option<GrantPlan>,
+    pub scroll: u16,
 }
 
 #[derive(Debug)]
@@ -324,6 +346,7 @@ impl App {
             KeyCode::Char('e') if self.focus != FocusArea::Username => self.action_edit(),
             KeyCode::Char('d') if self.focus != FocusArea::Username => self.action_delete(),
             KeyCode::Char('n') if self.focus != FocusArea::Username => self.action_rename(),
+            KeyCode::Char('c') if self.focus != FocusArea::Username => self.action_assist(),
             KeyCode::Enter if self.focus == FocusArea::Detail => self.action_edit(),
             _ => match self.focus {
                 FocusArea::Username => {
@@ -564,6 +587,8 @@ impl App {
         let mut edit_confirm: Option<(Award, String)> = None;
         let mut delete_confirm: Option<Award> = None;
         let mut rename_confirm: Option<String> = None;
+        let mut assist_run = false;
+        let mut assist_grant = false;
         let mut status: Option<String> = None;
 
         if let Some(modal) = self.modal.as_mut() {
@@ -660,6 +685,29 @@ impl App {
                         }
                     },
                 },
+                Modal::Assist(assist) => match assist.step {
+                    AssistStep::Query => match key.code {
+                        KeyCode::Enter => {
+                            assist_run = true;
+                        }
+                        _ => {
+                            let event = CrosstermEvent::Key(key);
+                            assist.input.handle_event(&event);
+                        }
+                    },
+                    AssistStep::Result => match key.code {
+                        KeyCode::Enter if assist.can_grant => {
+                            assist_grant = true;
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            assist.scroll = assist.scroll.saturating_sub(1);
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            assist.scroll = assist.scroll.saturating_add(1);
+                        }
+                        _ => {}
+                    },
+                },
                 Modal::Audit(_) => {}
             }
         }
@@ -699,6 +747,12 @@ impl App {
         if let Some(new_username) = rename_confirm {
             self.modal = None;
             self.commit_rename(new_username);
+        }
+        if assist_run {
+            self.run_assist_check();
+        }
+        if assist_grant {
+            self.commit_assist_grant();
         }
     }
 
@@ -745,6 +799,7 @@ impl App {
             Action::Edit => self.action_edit(),
             Action::Delete => self.action_delete(),
             Action::Rename => self.action_rename(),
+            Action::Assist => self.action_assist(),
             Action::Refresh => self.action_refresh(),
             Action::Audit => self.action_audit(),
         }
@@ -911,6 +966,106 @@ impl App {
             confirm: Input::default(),
             step: RenameStep::Name,
         }));
+    }
+
+    fn action_assist(&mut self) {
+        if !self.begin_dialog() {
+            return;
+        }
+        let Some(username) = self.results_username.clone() else {
+            self.modal = None;
+            self.status = "Look up a user before Assist".to_string();
+            return;
+        };
+        if self.data.is_none() {
+            self.modal = None;
+            self.status = "Still loading...".to_string();
+            return;
+        }
+        self.modal = Some(Modal::Assist(AssistModal {
+            username,
+            input: input_with_value("MCAB".to_string()),
+            step: AssistStep::Query,
+            report: String::new(),
+            can_grant: false,
+            grant: None,
+            scroll: 0,
+        }));
+    }
+
+    fn run_assist_check(&mut self) {
+        let Some(Modal::Assist(assist)) = self.modal.as_mut() else {
+            return;
+        };
+        let query = assist.input.value().trim().to_string();
+        if query.is_empty() {
+            self.status = "Enter an award request (MCAB / MCIB / MCMB)".to_string();
+            return;
+        }
+        let username = assist.username.clone();
+        let awards: Vec<Award> = self
+            .results
+            .iter()
+            .chain(self.duplicates.iter())
+            .cloned()
+            .collect();
+        let awards = if awards.is_empty() {
+            self.data
+                .as_ref()
+                .map(|data| get_awards_for_username(&data.index, &username))
+                .unwrap_or_default()
+        } else {
+            awards
+        };
+        let verdict = check_assist(&username, &awards, &query);
+        let report = verdict.format_report(&username);
+        let (can_grant, grant) = match &verdict {
+            AssistVerdict::Approve { grant, .. } => (true, Some(grant.clone())),
+            _ => (false, None),
+        };
+        if let Some(Modal::Assist(assist)) = self.modal.as_mut() {
+            assist.report = report;
+            assist.can_grant = can_grant;
+            assist.grant = grant;
+            assist.step = AssistStep::Result;
+            assist.scroll = 0;
+        }
+        self.status = if can_grant {
+            "Eligible — Enter to grant on sheet, Esc to cancel".to_string()
+        } else {
+            "Assist result — Esc to close".to_string()
+        };
+    }
+
+    fn commit_assist_grant(&mut self) {
+        let Some(Modal::Assist(assist)) = self.modal.take() else {
+            return;
+        };
+        let Some(grant) = assist.grant else {
+            self.status = "Nothing to grant".to_string();
+            return;
+        };
+        let username = assist.username;
+        let awards: Vec<Award> = self
+            .results
+            .iter()
+            .chain(self.duplicates.iter())
+            .cloned()
+            .collect();
+        let awards = if awards.is_empty() {
+            self.data
+                .as_ref()
+                .map(|data| get_awards_for_username(&data.index, &username))
+                .unwrap_or_default()
+        } else {
+            awards
+        };
+        let GrantPlan::UpgradeCell { new_cell, .. } = &grant;
+        let Some(target) = find_grant_target(&awards, &grant).cloned() else {
+            self.status = "Could not find the sheet row to upgrade".to_string();
+            return;
+        };
+        self.commit_edit(target, new_cell.clone());
     }
 
     fn commit_add(&mut self, award_def: AwardDef, suffix: String) {
