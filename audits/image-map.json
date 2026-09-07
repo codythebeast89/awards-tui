@@ -66,10 +66,14 @@
     "army sea duty": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/cc/U.S._Army_Sea_Duty_Ribbon.svg/1920px-U.S._Army_Sea_Duty_Ribbon.svg.png",
     "nato non-article 5": "https://upload.wikimedia.org/wikipedia/commons/0/09/NATO_Medal_ribbon_%28Non-Article_5%29.svg",
     "nato isaf": "https://upload.wikimedia.org/wikipedia/commons/thumb/9/9a/NATO_Medal_ISAF_ribbon.svg/1920px-NATO_Medal_ISAF_ribbon.svg.png",
-    "southwest asia service": "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6d/Southwest_Asia_Service_Medal_ribbon.svg/1920px-Southwest_Asia_Service_Medal_ribbon.svg.png"
+    "southwest asia service": "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6d/Southwest_Asia_Service_Medal_ribbon.svg/1920px-Southwest_Asia_Service_Medal_ribbon.svg.png",
+    "humanitarian aid": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/26/Humanitarian_Service_Medal_ribbon.svg/1920px-Humanitarian_Service_Medal_ribbon.svg.png",
+    "humanitarian service": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/26/Humanitarian_Service_Medal_ribbon.svg/1920px-Humanitarian_Service_Medal_ribbon.svg.png"
   },
   "foreign": {
     "queens dedication medal": "https://upload.wikimedia.org/wikipedia/commons/a/af/UK_Queen_EII_Coronation_Medal_ribbon.svg",
+    "british skill at arms badge": "https://www.militarymart.co.uk/cdn/shop/files/skill-at-arms-colour-militarymart.png",
+    "skill at arms badge": "https://www.militarymart.co.uk/cdn/shop/files/skill-at-arms-colour-militarymart.png",
     "combat readiness medal": "https://upload.wikimedia.org/wikipedia/commons/4/44/Combat_Readiness_Medal_ribbon.svg",
     "chief's fifty marksmanship badge": "https://upload.wikimedia.org/wikipedia/commons/d/de/Chiefs_50_Marksmanship_Badge.png",
     "air battle manager badge": "https://upload.wikimedia.org/wikipedia/commons/9/9c/USAF_-_Occupational_Badge_-_Air_Battle_Manager.svg",

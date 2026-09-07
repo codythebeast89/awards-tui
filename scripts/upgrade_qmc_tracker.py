@@ -54,9 +54,11 @@ LIVE_AWARDS = {
         ("NATO Non-Article 5", "2nd Award"),
         ("Outstanding Volunteer", ""),
         ("Southwest Asia Service", ""),
+        ("Humanitarian Aid", ""),
     ],
     "foreign": [
         ("Queens Dedication Medal", ""),
+        ("British Skill at Arms Badge", ""),
     ],
 }
 
@@ -494,7 +496,10 @@ BADGE_LAYOUT = {
         "header_col": 14,
         "img_col": 14,
         "name_col": 15,
-        "items": [("Queens Dedication Medal", "-")],
+        "items": [
+            ("Queens Dedication Medal", "-"),
+            ("British Skill at Arms Badge", "-"),
+        ],
     },
 }
 
