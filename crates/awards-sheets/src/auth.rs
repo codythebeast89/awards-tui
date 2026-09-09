@@ -602,4 +602,49 @@ mod tests {
         assert!(secret_mode_too_open(0o644));
         assert!(secret_mode_too_open(0o606));
     }
+
+    fn blank_token() -> AuthorizedUser {
+        AuthorizedUser {
+            token: String::new(),
+            refresh_token: None,
+            token_uri: None,
+            client_id: "id".into(),
+            client_secret: "secret".into(),
+            scopes: Vec::new(),
+            expiry: None,
+            account: None,
+            universe_domain: None,
+        }
+    }
+
+    /// Covers the branch `get_access_token` relies on: no token, refresh-only,
+    /// valid-outright, and expired-with-no-refresh-token — FR-003's "not
+    /// required to sign in again unless access has expired or been revoked".
+    #[test]
+    fn usable_prefers_valid_token_but_falls_back_to_refresh_token() {
+        let mut tok = blank_token();
+        assert!(
+            !tok.usable(),
+            "no access token and no refresh token must not be usable"
+        );
+
+        tok.refresh_token = Some("refresh".into());
+        assert!(
+            tok.usable(),
+            "a refresh token alone is usable — get_access_token() will refresh it"
+        );
+
+        tok.refresh_token = None;
+        tok.token = "access-token".into();
+        assert!(
+            tok.usable(),
+            "a non-empty token with no expiry set is usable outright"
+        );
+
+        tok.expiry = Some("2000-01-01T00:00:00Z".into());
+        assert!(
+            !tok.usable(),
+            "an expired token with no refresh token must not be usable"
+        );
+    }
 }

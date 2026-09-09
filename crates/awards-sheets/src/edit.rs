@@ -68,6 +68,39 @@ fn live_cell_value(api: &SheetsApi, sheet: &str, col: &str, row: i32) -> Result<
     ))
 }
 
+/// Find the sheet row (1-based) within an already-fetched column whose cell
+/// already belongs to `key` (case/format-normalized username match), scanning
+/// from `start` (1-based, inclusive). Returns the row plus the raw cell text,
+/// for the "@user already has this award" duplicate-add rejection.
+fn find_existing_row(col_vals: &[Vec<String>], start: i32, key: &str) -> Option<(i32, String)> {
+    for (i, row) in col_vals.iter().enumerate().skip((start - 1).max(0) as usize) {
+        let cell = row.first().map(|s| s.as_str()).unwrap_or("");
+        if normalize_username(Some(cell)).as_deref() == Some(key) {
+            return Some(((i + 1) as i32, cell.to_string()));
+        }
+    }
+    None
+}
+
+/// Find the first empty row (1-based) within an already-fetched column,
+/// scanning from `start` (1-based, inclusive); falls back to one past the
+/// last fetched row when the column has no empty cell in range.
+fn find_target_row(col_vals: &[Vec<String>], start: i32) -> i32 {
+    for (i, row) in col_vals.iter().enumerate().skip((start - 1).max(0) as usize) {
+        let cell = row.first().map(|s| s.as_str()).unwrap_or("");
+        if clean_cell(Some(cell)).is_empty() {
+            return (i + 1) as i32;
+        }
+    }
+    (col_vals.len() as i32 + 1).max(start)
+}
+
+/// Message for `add_award_to_user`'s lost-update race: the target cell was
+/// filled by someone else's write between our column read and our own write.
+fn cell_filled_message(col: &str, row: i32, live: &str) -> String {
+    format!("{col}{row} was filled by another edit (now {live:?}). Refresh and try again.")
+}
+
 /// Find the live sheet row for this cell near the CSV-computed address.
 pub fn find_live_row(api: &SheetsApi, award: &Award, window: i32) -> Result<Option<i32>, ApiError> {
     if award.sheet.is_empty() || award.col.is_empty() || award.row == 0 {
@@ -127,34 +160,19 @@ pub fn add_award_to_user(
     };
 
     let start = sheet_data_start_row(&award_def.sheet);
-    for (i, row) in col_vals.iter().enumerate().skip((start - 1) as usize) {
-        let cell = row.first().map(|s| s.as_str()).unwrap_or("");
-        if normalize_username(Some(cell)).as_deref() == Some(key.as_str()) {
-            return EditResult::err(format!(
-                "@{user} already has {} (row {})",
-                award_def.base_name,
-                i + 1
-            ));
-        }
+    if let Some((row, _cell)) = find_existing_row(&col_vals, start, &key) {
+        return EditResult::err(format!(
+            "@{user} already has {} (row {row})",
+            award_def.base_name
+        ));
     }
 
-    let mut target_row: Option<i32> = None;
-    for (i, row) in col_vals.iter().enumerate().skip((start - 1) as usize) {
-        let cell = row.first().map(|s| s.as_str()).unwrap_or("");
-        if clean_cell(Some(cell)).is_empty() {
-            target_row = Some((i + 1) as i32);
-            break;
-        }
-    }
-    let target_row = target_row.unwrap_or_else(|| (col_vals.len() as i32 + 1).max(start));
+    let target_row = find_target_row(&col_vals, start);
 
     // Re-check the chosen cell immediately before write to shrink lost-update races.
     match live_cell_value(&api, &award_def.sheet, &award_def.col, target_row) {
         Ok(live) if !live.is_empty() => {
-            return EditResult::err(format!(
-                "{}{} was filled by another edit (now {live:?}). Refresh and try again.",
-                award_def.col, target_row
-            ));
+            return EditResult::err(cell_filled_message(&award_def.col, target_row, &live));
         }
         Err(e) => {
             return EditResult::err(format!(
@@ -723,6 +741,62 @@ mod tests {
             "{}",
             result.message
         );
+    }
+
+    /// Edge case from spec.md: "clerk tries to log the same award for the
+    /// same member a second time" — add_award_to_user's duplicate-row lookup.
+    #[test]
+    fn find_existing_row_matches_normalized_username_case_and_format() {
+        let col_vals = vec![
+            vec!["Header".into()],
+            vec!["alice".into()],
+            vec!["Bob x2".into()],
+        ];
+        // Data starts at row 2 (1-based); header row is skipped.
+        assert_eq!(
+            find_existing_row(&col_vals, 2, "bob"),
+            Some((3, "Bob x2".to_string())),
+            "a suffixed cell still normalizes to its bare username"
+        );
+        assert_eq!(find_existing_row(&col_vals, 2, "carol"), None);
+        assert_eq!(
+            find_existing_row(&col_vals, 2, "header"),
+            None,
+            "rows before `start` must not be scanned"
+        );
+    }
+
+    #[test]
+    fn find_target_row_prefers_first_empty_cell_then_falls_back_past_the_end() {
+        let with_gap = vec![
+            vec!["Header".into()],
+            vec!["alice".into()],
+            vec!["".into()],
+            vec!["carol".into()],
+        ];
+        assert_eq!(find_target_row(&with_gap, 2), 3, "row 3 is the first empty cell");
+
+        let full = vec![
+            vec!["Header".into()],
+            vec!["alice".into()],
+            vec!["bob".into()],
+        ];
+        assert_eq!(
+            find_target_row(&full, 2),
+            4,
+            "no empty cell in range falls back to one past the last fetched row"
+        );
+    }
+
+    /// Edge case from research.md §5 / plan.md's risk notes: the target cell
+    /// gets filled by another clerk's write between our column read and our
+    /// own write (add_award_to_user's lost-update guard).
+    #[test]
+    fn filled_message_names_the_cell_and_the_live_value() {
+        let msg = cell_filled_message("C", 12, "someone_else");
+        assert!(msg.contains("C12"), "{msg}");
+        assert!(msg.contains("someone_else"), "{msg}");
+        assert!(msg.contains("Refresh and try again"), "{msg}");
     }
 
     /// Live smoke: add then delete a throwaway row. Requires token.json / network.

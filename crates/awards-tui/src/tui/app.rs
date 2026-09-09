@@ -423,6 +423,7 @@ impl App {
                     EditResult {
                         ok: false,
                         message,
+                        error: result.error,
                         award: result.award,
                         awards: result.awards,
                     },

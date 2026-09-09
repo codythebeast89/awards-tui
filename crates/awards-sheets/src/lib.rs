@@ -20,7 +20,7 @@ pub use auth::{
 pub use awards_core::{build_cell_value, find_first_empty_row};
 pub use edit::{
     add_award_to_user, award_with_live_row, find_live_row, remove_award, rename_username,
-    update_award_cell, EditResult,
+    update_award_cell, EditError, EditResult,
 };
 
 #[derive(Debug, Error)]
