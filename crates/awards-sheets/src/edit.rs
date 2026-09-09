@@ -7,11 +7,44 @@ use awards_core::{
     AwardDef, AwardsData,
 };
 use std::collections::{BTreeMap, HashSet};
+use thiserror::Error;
+
+/// Typed classification for [`EditResult`] failures.
+///
+/// Every variant carries only a `String` (never the underlying [`ApiError`] /
+/// [`AuthError`](crate::AuthError) directly) so that `EditError`, and therefore
+/// `EditResult`, can stay `Clone` — those inner error types are not `Clone`.
+/// The variant is the classification; `message`/`Display` stay byte-identical
+/// to the pre-existing user-facing text so no caller-visible string changes.
+#[derive(Debug, Clone, Error)]
+pub enum EditError {
+    /// Bad input from the caller (empty/malformed username, cell, etc.) — never reached the sheet.
+    #[error("{0}")]
+    Validation(String),
+    /// The in-memory `Award`/cell no longer matches what's live on the sheet; refreshing and
+    /// retrying is the expected recovery.
+    #[error("{0}")]
+    Stale(String),
+    /// The requested change collides with existing data already on the sheet (duplicate award,
+    /// username already owns the target cell/column, lost-update race on an empty cell).
+    #[error("{0}")]
+    Conflict(String),
+    /// The target data (cells for a username, etc.) does not exist on the live sheet.
+    #[error("{0}")]
+    NotFound(String),
+    /// The Sheets API call itself failed (auth, network, HTTP).
+    #[error("{0}")]
+    Api(String),
+    /// Anything not covered by the above.
+    #[error("{0}")]
+    Other(String),
+}
 
 #[derive(Debug, Clone)]
 pub struct EditResult {
     pub ok: bool,
     pub message: String,
+    pub error: Option<EditError>,
     pub award: Option<Award>,
     pub awards: Vec<Award>,
 }
@@ -21,6 +54,7 @@ impl EditResult {
         Self {
             ok: true,
             message: message.into(),
+            error: None,
             award,
             awards: Vec::new(),
         }
@@ -30,25 +64,28 @@ impl EditResult {
         Self {
             ok: true,
             message: message.into(),
+            error: None,
             award: awards.first().cloned(),
             awards,
         }
     }
 
-    fn err(message: impl Into<String>) -> Self {
+    fn err(error: EditError) -> Self {
         Self {
             ok: false,
-            message: message.into(),
+            message: error.to_string(),
+            error: Some(error),
             award: None,
             awards: Vec::new(),
         }
     }
 
-    fn err_partial(message: impl Into<String>, awards: Vec<Award>) -> Self {
+    fn err_partial(error: EditError, awards: Vec<Award>) -> Self {
         Self {
             ok: false,
-            message: message.into(),
+            message: error.to_string(),
             award: awards.first().cloned(),
+            error: Some(error),
             awards,
         }
     }
@@ -136,35 +173,35 @@ pub fn add_award_to_user(
 ) -> EditResult {
     let user = username.trim().trim_start_matches('@');
     if user.is_empty() {
-        return EditResult::err("Username required");
+        return EditResult::err(EditError::Validation("Username required".into()));
     }
     let Some(key) = normalize_username(Some(user)) else {
-        return EditResult::err("Username required");
+        return EditResult::err(EditError::Validation("Username required".into()));
     };
     let cell_value = build_cell_value(user, suffix);
 
     let api = match SheetsApi::connect(interactive_auth) {
         Ok(api) => api,
-        Err(e) => return EditResult::err(e.to_string()),
+        Err(e) => return EditResult::err(EditError::Api(e.to_string())),
     };
 
     let col_range = format!("'{}'!{}:{}", award_def.sheet, award_def.col, award_def.col);
     let col_vals = match api.get_values(&col_range) {
         Ok(v) => v,
         Err(e) => {
-            return EditResult::err(format!(
+            return EditResult::err(EditError::Api(format!(
                 "Could not re-read {}!{} to place the award: {e}",
                 award_def.sheet, award_def.col
-            ));
+            )));
         }
     };
 
     let start = sheet_data_start_row(&award_def.sheet);
     if let Some((row, _cell)) = find_existing_row(&col_vals, start, &key) {
-        return EditResult::err(format!(
+        return EditResult::err(EditError::Conflict(format!(
             "@{user} already has {} (row {row})",
             award_def.base_name
-        ));
+        )));
     }
 
     let target_row = find_target_row(&col_vals, start);
@@ -172,20 +209,24 @@ pub fn add_award_to_user(
     // Re-check the chosen cell immediately before write to shrink lost-update races.
     match live_cell_value(&api, &award_def.sheet, &award_def.col, target_row) {
         Ok(live) if !live.is_empty() => {
-            return EditResult::err(cell_filled_message(&award_def.col, target_row, &live));
+            return EditResult::err(EditError::Conflict(cell_filled_message(
+                &award_def.col,
+                target_row,
+                &live,
+            )));
         }
         Err(e) => {
-            return EditResult::err(format!(
+            return EditResult::err(EditError::Api(format!(
                 "Could not re-check {}!{}{} before write: {e}",
                 award_def.sheet, award_def.col, target_row
-            ));
+            )));
         }
         Ok(_) => {}
     }
 
     let range = a1(&award_def.sheet, &award_def.col, target_row);
     if let Err(e) = api.update_values(&range, vec![vec![cell_value.clone()]]) {
-        return EditResult::err(format!("Write failed: {e}"));
+        return EditResult::err(EditError::Api(format!("Write failed: {e}")));
     }
 
     let display = format_award_name(&award_def.category, Some(&award_def.base_name), &cell_value)
@@ -210,28 +251,32 @@ pub fn add_award_to_user(
 
 pub fn update_award_cell(award: &Award, new_cell: &str, interactive_auth: bool) -> EditResult {
     if award.sheet.is_empty() || award.col.is_empty() || award.row == 0 {
-        return EditResult::err("Award has no sheet location (refresh and try again)");
+        return EditResult::err(EditError::Stale(
+            "Award has no sheet location (refresh and try again)".into(),
+        ));
     }
     let new_cell = new_cell.trim();
     if new_cell.is_empty() {
-        return EditResult::err("Cell value cannot be empty (use delete instead)");
+        return EditResult::err(EditError::Validation(
+            "Cell value cannot be empty (use delete instead)".into(),
+        ));
     }
     if normalize_username(Some(new_cell)).is_none() {
-        return EditResult::err("Cell must start with a username");
+        return EditResult::err(EditError::Validation("Cell must start with a username".into()));
     }
 
     let api = match SheetsApi::connect(interactive_auth) {
         Ok(api) => api,
-        Err(e) => return EditResult::err(e.to_string()),
+        Err(e) => return EditResult::err(EditError::Api(e.to_string())),
     };
 
     let live_row = match find_live_row(&api, award, 24) {
         Ok(r) => r,
-        Err(e) => return EditResult::err(format!("Update failed: {e}")),
+        Err(e) => return EditResult::err(EditError::Api(format!("Update failed: {e}"))),
     };
     let Some(live_row) = live_row else {
         let live = live_cell_value(&api, &award.sheet, &award.col, award.row).unwrap_or_default();
-        return EditResult::err(cell_stale_message(award, &live));
+        return EditResult::err(EditError::Stale(cell_stale_message(award, &live)));
     };
 
     let mut award = award.clone();
@@ -240,21 +285,21 @@ pub fn update_award_cell(award: &Award, new_cell: &str, interactive_auth: bool) 
     let expected = clean_cell(Some(&award.cell));
     let live = match live_cell_value(&api, &award.sheet, &award.col, award.row) {
         Ok(v) => v,
-        Err(e) => return EditResult::err(format!("Update failed: {e}")),
+        Err(e) => return EditResult::err(EditError::Api(format!("Update failed: {e}"))),
     };
     if live != expected {
-        return EditResult::err(cell_stale_message(&award, &live));
+        return EditResult::err(EditError::Stale(cell_stale_message(&award, &live)));
     }
 
     let Some(new_key) = normalize_username(Some(new_cell)) else {
-        return EditResult::err("Cell must start with a username");
+        return EditResult::err(EditError::Validation("Cell must start with a username".into()));
     };
     let old_key = normalize_username(Some(&award.cell));
     if old_key.as_deref() != Some(new_key.as_str()) {
         let col_range = format!("'{}'!{}:{}", award.sheet, award.col, award.col);
         let col_vals = match api.get_values(&col_range) {
             Ok(v) => v,
-            Err(e) => return EditResult::err(format!("Update failed: {e}")),
+            Err(e) => return EditResult::err(EditError::Api(format!("Update failed: {e}"))),
         };
         let start = sheet_data_start_row(&award.sheet);
         for (i, row) in col_vals.iter().enumerate().skip((start - 1) as usize) {
@@ -264,16 +309,16 @@ pub fn update_award_cell(award: &Award, new_cell: &str, interactive_auth: bool) 
             }
             let cell = row.first().map(|s| s.as_str()).unwrap_or("");
             if normalize_username(Some(cell)).as_deref() == Some(new_key.as_str()) {
-                return EditResult::err(format!(
+                return EditResult::err(EditError::Conflict(format!(
                     "@{new_key} already has this award column (row {sheet_row})"
-                ));
+                )));
             }
         }
     }
 
     let range = a1(&award.sheet, &award.col, award.row);
     if let Err(e) = api.update_values(&range, vec![vec![new_cell.to_string()]]) {
-        return EditResult::err(format!("Update failed: {e}"));
+        return EditResult::err(EditError::Api(format!("Update failed: {e}")));
     }
 
     let base = if award.base_name.is_empty() {
@@ -301,21 +346,23 @@ pub fn update_award_cell(award: &Award, new_cell: &str, interactive_auth: bool) 
 /// Clear the award cell and shift later entries in that column upward.
 pub fn remove_award(award: &Award, interactive_auth: bool) -> EditResult {
     if award.sheet.is_empty() || award.col.is_empty() || award.row == 0 {
-        return EditResult::err("Award has no sheet location (refresh and try again)");
+        return EditResult::err(EditError::Stale(
+            "Award has no sheet location (refresh and try again)".into(),
+        ));
     }
 
     let api = match SheetsApi::connect(interactive_auth) {
         Ok(api) => api,
-        Err(e) => return EditResult::err(e.to_string()),
+        Err(e) => return EditResult::err(EditError::Api(e.to_string())),
     };
 
     let live_row = match find_live_row(&api, award, 24) {
         Ok(r) => r,
-        Err(e) => return EditResult::err(format!("Delete failed: {e}")),
+        Err(e) => return EditResult::err(EditError::Api(format!("Delete failed: {e}"))),
     };
     let Some(live_row) = live_row else {
         let live = live_cell_value(&api, &award.sheet, &award.col, award.row).unwrap_or_default();
-        return EditResult::err(cell_stale_message(award, &live));
+        return EditResult::err(EditError::Stale(cell_stale_message(award, &live)));
     };
 
     let mut award = award.clone();
@@ -324,11 +371,11 @@ pub fn remove_award(award: &Award, interactive_auth: bool) -> EditResult {
     let tail_range = format!("'{}'!{}{}:{}", award.sheet, award.col, award.row, award.col);
     let col_vals = match api.get_values(&tail_range) {
         Ok(v) => v,
-        Err(e) => return EditResult::err(format!("Delete failed: {e}")),
+        Err(e) => return EditResult::err(EditError::Api(format!("Delete failed: {e}"))),
     };
     let live = clean_cell(col_vals.first().and_then(|r| r.first()).map(|s| s.as_str()));
     if live != clean_cell(Some(&award.cell)) {
-        return EditResult::err(cell_stale_message(&award, &live));
+        return EditResult::err(EditError::Stale(cell_stale_message(&award, &live)));
     }
 
     let remaining: Vec<String> = col_vals
@@ -339,10 +386,10 @@ pub fn remove_award(award: &Award, interactive_auth: bool) -> EditResult {
     // Final stale check right before the column rewrite.
     let live_again = match live_cell_value(&api, &award.sheet, &award.col, award.row) {
         Ok(v) => v,
-        Err(e) => return EditResult::err(format!("Delete failed: {e}")),
+        Err(e) => return EditResult::err(EditError::Api(format!("Delete failed: {e}"))),
     };
     if live_again != clean_cell(Some(&award.cell)) {
-        return EditResult::err(cell_stale_message(&award, &live_again));
+        return EditResult::err(EditError::Stale(cell_stale_message(&award, &live_again)));
     }
 
     let mut write_vals: Vec<Vec<String>> = remaining.iter().map(|v| vec![v.clone()]).collect();
@@ -357,7 +404,7 @@ pub fn remove_award(award: &Award, interactive_auth: bool) -> EditResult {
         a1(&award.sheet, &award.col, award.row)
     };
     if let Err(e) = api.update_values(&write_range, write_vals) {
-        return EditResult::err(format!("Delete failed: {e}"));
+        return EditResult::err(EditError::Api(format!("Delete failed: {e}")));
     }
 
     EditResult::ok_msg(
@@ -407,16 +454,18 @@ pub fn rename_username(
     interactive_auth: bool,
 ) -> EditResult {
     let Some(old_key) = normalize_username(Some(old_username)) else {
-        return EditResult::err("Old username required");
+        return EditResult::err(EditError::Validation("Old username required".into()));
     };
     let Some(display_new) = parse_bare_username(new_username) else {
-        return EditResult::err(
-            "New username must be a bare Roblox name (letters, digits, underscore only)",
-        );
+        return EditResult::err(EditError::Validation(
+            "New username must be a bare Roblox name (letters, digits, underscore only)".into(),
+        ));
     };
     let new_key = display_new.to_ascii_lowercase();
     if old_key == new_key {
-        return EditResult::err("New username is the same as the current name");
+        return EditResult::err(EditError::Validation(
+            "New username is the same as the current name".into(),
+        ));
     }
 
     let fetched;
@@ -427,7 +476,7 @@ pub fn rename_username(
                 fetched = data;
                 &fetched
             }
-            Err(err) => return EditResult::err(err.to_string()),
+            Err(err) => return EditResult::err(EditError::Api(err.to_string())),
         },
     };
 
@@ -436,14 +485,16 @@ pub fn rename_username(
         .filter(|award| !award.sheet.is_empty() && !award.col.is_empty() && award.row != 0)
         .collect();
     if awards.is_empty() {
-        return EditResult::err(format!("No sheet cells found for @{old_key}"));
+        return EditResult::err(EditError::NotFound(format!(
+            "No sheet cells found for @{old_key}"
+        )));
     }
 
     let existing_new_count = get_awards_for_username(&data.index, &new_key).len();
 
     let api = match SheetsApi::connect(interactive_auth) {
         Ok(api) => api,
-        Err(err) => return EditResult::err(err.to_string()),
+        Err(err) => return EditResult::err(EditError::Api(err.to_string())),
     };
 
     // Group by column so we fetch each column once (also needed for overlap + retry).
@@ -466,9 +517,9 @@ pub fn rename_username(
         let col_vals = match api.get_values(&col_range) {
             Ok(v) => v,
             Err(err) => {
-                return EditResult::err(format!(
+                return EditResult::err(EditError::Api(format!(
                     "Could not re-read {sheet}!{col} before rename: {err}"
-                ));
+                )));
             }
         };
         let data_start = sheet_data_start_row(&sheet);
@@ -596,9 +647,9 @@ pub fn rename_username(
     if !overlaps.is_empty() {
         let count = overlaps.len();
         let sample = overlaps.into_iter().take(5).collect::<Vec<_>>().join(", ");
-        return EditResult::err(format!(
+        return EditResult::err(EditError::Conflict(format!(
             "@{new_key} already has {count} overlapping award column(s) on the live sheet ({sample}). Resolve those first."
-        ));
+        )));
     }
 
     let already_done = done_awards.len();
@@ -611,9 +662,9 @@ pub fn rename_username(
                 done_awards,
             );
         }
-        return EditResult::err(format!(
+        return EditResult::err(EditError::Stale(format!(
             "No live cells still belonged to @{old_key}. Refresh and try again."
-        ));
+        )));
     }
 
     let payload: Vec<(String, Vec<Vec<String>>)> = writes
@@ -635,16 +686,16 @@ pub fn rename_username(
                 .map(|(_, _, award)| award),
         );
         if updated.is_empty() {
-            return EditResult::err(format!("Rename write failed: {err}"));
+            return EditResult::err(EditError::Api(format!("Rename write failed: {err}")));
         }
         let remaining = format_remaining_ranges(&remaining_ranges);
         return EditResult::err_partial(
-            format!(
+            EditError::Api(format!(
                 "Renamed {} cell(s) for @{old_key} → {display_new}, then write failed ({err}). Remaining {}: {}. Retry the same rename to finish.",
                 written,
                 remaining_ranges.len(),
                 remaining
-            ),
+            )),
             updated,
         );
     }
@@ -797,6 +848,44 @@ mod tests {
         assert!(msg.contains("C12"), "{msg}");
         assert!(msg.contains("someone_else"), "{msg}");
         assert!(msg.contains("Refresh and try again"), "{msg}");
+    }
+
+    /// Constitution-mandated typed-error hygiene: `EditResult::message` (the
+    /// pre-existing stringly-typed field callers already match on) must stay
+    /// byte-identical to the new typed `EditError`'s `Display` output.
+    #[test]
+    fn err_result_message_matches_the_typed_error_display() {
+        let error = EditError::Validation("Username required".into());
+        let result = EditResult::err(error.clone());
+        assert!(!result.ok);
+        assert_eq!(result.message, error.to_string());
+        assert_eq!(result.error.map(|e| e.to_string()), Some(error.to_string()));
+    }
+
+    /// `EditError` variants classify failures by *category*, not merely by
+    /// re-deriving it from the message text — two variants can carry the
+    /// same text and still be distinguishable by match arm.
+    #[test]
+    fn edit_error_variants_classify_by_category_not_just_text() {
+        let validation = EditError::Validation("duplicate message".into());
+        let conflict = EditError::Conflict("duplicate message".into());
+        assert_eq!(validation.to_string(), conflict.to_string());
+        assert_ne!(
+            std::mem::discriminant(&validation),
+            std::mem::discriminant(&conflict)
+        );
+
+        // Sanity: the real call sites route into the categories this test expects.
+        let dup_add = add_award_to_user("", &AwardDef {
+            category: "badges".into(),
+            sheet: "Badges Database".into(),
+            col: "C".into(),
+            base_name: "Test".into(),
+        }, "", false);
+        assert!(matches!(dup_add.error, Some(EditError::Validation(_))));
+
+        let bad_rename = rename_username("alice", "Bob - Master", None, false);
+        assert!(matches!(bad_rename.error, Some(EditError::Validation(_))));
     }
 
     /// Live smoke: add then delete a throwaway row. Requires token.json / network.

@@ -405,7 +405,14 @@ applies project-wide and is non-negotiable per its own Governance section.
       both copies exist simultaneously. This session's device link has no delete capability for
       this device, so this requires either the repo owner's local `rm`, or a session/device link
       with delete access.
-- [ ] T021 Replace `awards-sheets::edit::EditResult`'s stringly-typed `message: String` failure
+      **Audit note (2026-09-09)**: a device-side spot check found `archive/` empty and
+      `scripts/rebuild_decorations_styled.py` already absent from the active `scripts/`
+      directory — the archival write this session believed it made never reached the device
+      (same class of silent write failure as T021 below), and the script may since have been
+      removed locally by the repo owner. Before treating T020 as satisfied, confirm the file is
+      still recoverable (`git log --all --oneline -- scripts/rebuild_decorations_styled.py`,
+      `git status`) so no version of it is lost with no `archive/` copy and no git history.
+- [X] T021 Replace `awards-sheets::edit::EditResult`'s stringly-typed `message: String` failure
       path with a typed error enum (`thiserror`) distinguishing at least stale-write,
       duplicate-award, validation, and pass-through API/auth failure variants, and thread it
       through `add_award_to_user`, `update_award_cell`, `remove_award`, and `rename_username`
@@ -418,3 +425,15 @@ applies project-wide and is non-negotiable per its own Governance section.
       carry (`awards: Vec<Award>`, used by `rename_username`'s partial-write reporting) in
       whatever replaces it — this is a structural typing fix, not a behavior change; re-run the
       full workspace gate (`cargo build/test/clippy --workspace --locked`) after.
+      **Remediation note (2026-09-09)**: a device-side spot check (triggered by the repo owner's
+      local `cargo run` failing with `E0432: unresolved import edit::EditError`) found that the
+      `EditError` enum had never actually reached `edit.rs` on the device — `lib.rs` and
+      `tui/app.rs` were already updated to expect it, but the `edit.rs` write itself silently
+      failed to land, and this file's own earlier verification checked a local sandbox cache
+      rather than the device's actual file. `EditError` (`Validation`/`Stale`/`Conflict`/
+      `NotFound`/`Api`/`Other`) was reconstructed with byte-identical message text, re-verified
+      with `cargo build/test/clippy --workspace` (all green, including
+      `err_result_message_matches_the_typed_error_display` and
+      `edit_error_variants_classify_by_category_not_just_text`), committed to the device, and
+      then re-verified a second time from freshly re-staged copies of every file this feature
+      touched (not the cached sandbox copies) to rule out further drift.
