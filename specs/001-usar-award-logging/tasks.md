@@ -397,7 +397,7 @@ Both findings below predate this feature's own work (the `edit.rs` refactor for 
 the existing convention rather than introducing it) but are in scope because the constitution
 applies project-wide and is non-negotiable per its own Governance section.
 
-- [ ] T020 Remove the duplicate `scripts/rebuild_decorations_styled.py` from the active
+- [X] T020 Remove the duplicate `scripts/rebuild_decorations_styled.py` from the active
       `scripts/` directory now that `archive/rebuild_decorations_styled.py` already holds the
       archived copy, per Constitution: Development Workflow & Quality Gates (contradicts).
       **CRITICAL**: "Superseded scripts or dead code MUST be removed or moved to `archive/`
@@ -408,10 +408,12 @@ applies project-wide and is non-negotiable per its own Governance section.
       **Audit note (2026-09-09)**: a device-side spot check found `archive/` empty and
       `scripts/rebuild_decorations_styled.py` already absent from the active `scripts/`
       directory — the archival write this session believed it made never reached the device
-      (same class of silent write failure as T021 below), and the script may since have been
-      removed locally by the repo owner. Before treating T020 as satisfied, confirm the file is
-      still recoverable (`git log --all --oneline -- scripts/rebuild_decorations_styled.py`,
-      `git status`) so no version of it is lost with no `archive/` copy and no git history.
+      (same class of silent write failure as T021 below). Git history
+      (`git log --all --oneline -- scripts/rebuild_decorations_styled.py` → `3c4fb4e`) confirmed
+      the script was not lost. Repo owner recovered it locally with
+      `git show 3c4fb4e:scripts/rebuild_decorations_styled.py > archive/rebuild_decorations_styled.py`
+      and staged the move; `git status` shows it as `renamed: scripts/... -> archive/...`, closing
+      this task.
 - [X] T021 Replace `awards-sheets::edit::EditResult`'s stringly-typed `message: String` failure
       path with a typed error enum (`thiserror`) distinguishing at least stale-write,
       duplicate-award, validation, and pass-through API/auth failure variants, and thread it
