@@ -1419,3 +1419,524 @@ fn resolve_live_rows(api: &SheetsApi, awards: &[Award]) -> Vec<Award> {
         .map(|award| award_with_live_row(api, award, 24).unwrap_or_else(|_| award.clone()))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    //! Modal state-machine tests: what a keypress does to `App::modal` / `App::status`
+    //! / `App::busy`, without touching the terminal or the network. Writes route through
+    //! `commit_*`, which spawn a background thread that calls the real Sheets client;
+    //! with no credentials on the test machine that thread fails fast over on an unrelated
+    //! channel, so it never affects the synchronous assertions here.
+
+    use super::*;
+    use std::sync::mpsc;
+
+    fn test_app() -> (App, mpsc::Receiver<WorkerMsg>) {
+        let (tx, rx) = mpsc::channel();
+        (App::new(tx), rx)
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn award(base_name: &str, name: &str, sheet: &str, col: &str, row: i32, cell: &str) -> Award {
+        Award::new("badges", name)
+            .with_location(sheet, col, row)
+            .with_cell(cell, base_name)
+    }
+
+    fn awards_data_with(username: &str, awards: Vec<Award>) -> AwardsData {
+        let mut data = AwardsData::default();
+        data.index.insert(username.to_string(), awards);
+        data
+    }
+
+    fn assist_modal(username: &str, query: &str, step: AssistStep) -> AssistModal {
+        AssistModal {
+            username: username.to_string(),
+            input: input_with_value(query.to_string()),
+            step,
+            report: String::new(),
+            can_grant: false,
+            grant: None,
+            scroll: 0,
+        }
+    }
+
+    // ---------- Esc cancels whatever modal is open ----------
+
+    #[test]
+    fn esc_closes_edit_modal_and_reports_cancelled() {
+        let (mut app, _rx) = test_app();
+        app.modal = Some(Modal::Edit(EditModal {
+            award: award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice"),
+            input: input_with_value("alice".into()),
+        }));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.modal.is_none());
+        assert_eq!(app.status, "Dialog cancelled");
+    }
+
+    #[test]
+    fn esc_closes_audit_modal_without_overwriting_status() {
+        let (mut app, _rx) = test_app();
+        app.status = "Wrote audits/audit-x.txt".to_string();
+        app.modal = Some(Modal::Audit(AuditModal {
+            path: "audits/audit-x.txt".into(),
+            lines: vec!["line".into()],
+            scroll: 0,
+        }));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.modal.is_none());
+        assert_eq!(
+            app.status, "Wrote audits/audit-x.txt",
+            "closing the audit browser must not stomp the summary line"
+        );
+    }
+
+    // ---------- Opening a modal is refused while another is open, or while busy ----------
+
+    #[test]
+    fn action_add_refuses_to_replace_an_open_modal() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        app.results_username = Some("alice".into());
+        app.modal = Some(Modal::Assist(assist_modal("alice", "MCAB", AssistStep::Query)));
+        app.action_add();
+        assert!(
+            matches!(app.modal, Some(Modal::Assist(_))),
+            "an already-open modal must not be replaced"
+        );
+        assert_eq!(app.status, "Wait for the current sheet operation to finish");
+    }
+
+    #[test]
+    fn action_edit_refuses_to_open_while_busy() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        app.busy = true;
+        app.action_edit();
+        assert!(app.modal.is_none());
+        assert_eq!(app.status, "Wait for the current sheet operation to finish");
+    }
+
+    // ---------- Edit modal: opening ----------
+
+    #[test]
+    fn action_edit_opens_prefilled_with_the_selected_awards_cell() {
+        let (mut app, _rx) = test_app();
+        let a = award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice x2");
+        app.visible = vec![VisibleAward { award: a.clone(), warning: false }];
+        app.awards_state.select(Some(0));
+        app.action_edit();
+        match &app.modal {
+            Some(Modal::Edit(edit)) => {
+                assert_eq!(edit.award, a);
+                assert_eq!(edit.input.value(), "alice x2");
+            }
+            other => panic!("expected Edit modal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn action_edit_without_a_selection_shows_a_hint_and_opens_nothing() {
+        let (mut app, _rx) = test_app();
+        app.action_edit();
+        assert!(app.modal.is_none());
+        assert_eq!(app.status, "Select an award to edit");
+    }
+
+    // ---------- Add modal: pick -> suffix ----------
+
+    #[test]
+    fn add_modal_enter_with_a_selection_advances_to_suffix() {
+        let (mut app, _rx) = test_app();
+        let def = AwardDef {
+            category: "badges".into(),
+            sheet: "Badges Database".into(),
+            col: "C".into(),
+            base_name: "Army Service Ribbon".into(),
+        };
+        app.modal = Some(Modal::Add(AddModal::new(vec![def.clone()])));
+        app.handle_key(key(KeyCode::Enter));
+        match &app.modal {
+            Some(Modal::Add(add)) => {
+                assert!(matches!(add.step, AddStep::Suffix));
+                assert_eq!(add.chosen.as_ref(), Some(&def));
+            }
+            other => panic!("expected Add modal in Suffix step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_modal_enter_with_no_filtered_candidates_stays_on_pick() {
+        let (mut app, _rx) = test_app();
+        let def = AwardDef {
+            category: "badges".into(),
+            sheet: "Badges Database".into(),
+            col: "C".into(),
+            base_name: "Army Service Ribbon".into(),
+        };
+        let mut add = AddModal::new(vec![def]);
+        add.filtered.clear();
+        add.state.select(None);
+        app.modal = Some(Modal::Add(add));
+        app.handle_key(key(KeyCode::Enter));
+        match &app.modal {
+            Some(Modal::Add(add)) => assert!(matches!(add.step, AddStep::Pick)),
+            other => panic!("expected Add modal still on Pick step, got {other:?}"),
+        }
+        assert_eq!(app.status, "Select an award first");
+    }
+
+    #[test]
+    fn add_modal_suffix_enter_commits_the_write_and_closes_the_modal() {
+        let (mut app, _rx) = test_app();
+        app.results_username = Some("alice".into());
+        let def = AwardDef {
+            category: "badges".into(),
+            sheet: "Badges Database".into(),
+            col: "C".into(),
+            base_name: "Army Service Ribbon".into(),
+        };
+        let mut add = AddModal::new(vec![def.clone()]);
+        add.chosen = Some(def.clone());
+        add.step = AddStep::Suffix;
+        app.modal = Some(Modal::Add(add));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none(), "confirming Add should close the modal");
+        assert!(app.busy, "confirming Add should mark the app busy while the write runs");
+        assert_eq!(app.status, format!("Writing {}...", def.base_name));
+    }
+
+    // ---------- Delete modal: typed confirmation gate ----------
+
+    #[test]
+    fn delete_modal_requires_the_word_delete() {
+        let (mut app, _rx) = test_app();
+        let a = award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice");
+        app.modal = Some(Modal::Delete(DeleteModal {
+            award: a,
+            input: input_with_value("nope".into()),
+            viewed_username: "alice".into(),
+        }));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.modal.is_some(), "wrong confirmation text must not close the modal");
+        assert!(!app.busy);
+        assert_eq!(app.status, "Type \"delete\" to confirm");
+    }
+
+    #[test]
+    fn delete_modal_confirms_case_insensitively_and_commits() {
+        let (mut app, _rx) = test_app();
+        let a = award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice");
+        app.modal = Some(Modal::Delete(DeleteModal {
+            award: a.clone(),
+            input: input_with_value("DELETE".into()),
+            viewed_username: "alice".into(),
+        }));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert!(app.busy);
+        assert_eq!(app.pending_delete.as_ref(), Some(&a));
+        assert_eq!(app.status, format!("Removing {}...", a.name));
+    }
+
+    // ---------- Rename modal: two-step gate (name, then typed "rename") ----------
+
+    #[test]
+    fn rename_modal_rejects_a_non_bare_username() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        app.modal = Some(Modal::Rename(RenameModal {
+            from: "alice".into(),
+            cell_count: 1,
+            existing_new: 0,
+            input: input_with_value("Bob - Master".into()),
+            confirm: Input::default(),
+            step: RenameStep::Name,
+        }));
+        app.handle_key(key(KeyCode::Enter));
+        match &app.modal {
+            Some(Modal::Rename(rename)) => assert!(matches!(rename.step, RenameStep::Name)),
+            other => panic!("expected Rename modal still on Name step, got {other:?}"),
+        }
+        assert_eq!(app.status, "Enter a bare Roblox username (no suffixes)");
+    }
+
+    #[test]
+    fn rename_modal_rejects_the_same_username() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        app.modal = Some(Modal::Rename(RenameModal {
+            from: "alice".into(),
+            cell_count: 1,
+            existing_new: 0,
+            input: input_with_value("alice".into()),
+            confirm: Input::default(),
+            step: RenameStep::Name,
+        }));
+        app.handle_key(key(KeyCode::Enter));
+        match &app.modal {
+            Some(Modal::Rename(rename)) => assert!(matches!(rename.step, RenameStep::Name)),
+            other => panic!("expected Rename modal still on Name step, got {other:?}"),
+        }
+        assert_eq!(app.status, "New username is the same as the current name");
+    }
+
+    #[test]
+    fn rename_modal_valid_name_advances_to_confirm_step() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        app.modal = Some(Modal::Rename(RenameModal {
+            from: "alice".into(),
+            cell_count: 1,
+            existing_new: 0,
+            input: input_with_value("bob".into()),
+            confirm: Input::default(),
+            step: RenameStep::Name,
+        }));
+        app.handle_key(key(KeyCode::Enter));
+        match &app.modal {
+            Some(Modal::Rename(rename)) => assert!(matches!(rename.step, RenameStep::Confirm)),
+            other => panic!("expected Rename modal to advance to Confirm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rename_modal_confirm_step_recomputes_existing_new_award_count() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(awards_data_with(
+            "bob",
+            vec![award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 11, "bob")],
+        ));
+        app.modal = Some(Modal::Rename(RenameModal {
+            from: "alice".into(),
+            cell_count: 1,
+            existing_new: 0,
+            input: input_with_value("bob".into()),
+            confirm: Input::default(),
+            step: RenameStep::Confirm,
+        }));
+        // Any keystroke on the Confirm step recomputes existing_new, not just Enter.
+        app.handle_key(key(KeyCode::Char('x')));
+        match &app.modal {
+            Some(Modal::Rename(rename)) => assert_eq!(rename.existing_new, 1),
+            other => panic!("expected Rename modal on Confirm step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rename_modal_confirm_requires_the_word_rename() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        app.modal = Some(Modal::Rename(RenameModal {
+            from: "alice".into(),
+            cell_count: 1,
+            existing_new: 0,
+            input: input_with_value("bob".into()),
+            confirm: input_with_value("nope".into()),
+            step: RenameStep::Confirm,
+        }));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.modal.is_some(), "wrong confirm text must not close the modal");
+        assert_eq!(app.status, "Type \"rename\" to confirm");
+    }
+
+    #[test]
+    fn rename_modal_confirm_typed_commits_the_rename_and_closes() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        app.results_username = Some("alice".into());
+        app.modal = Some(Modal::Rename(RenameModal {
+            from: "alice".into(),
+            cell_count: 1,
+            existing_new: 0,
+            input: input_with_value("bob".into()),
+            confirm: input_with_value("rename".into()),
+            step: RenameStep::Confirm,
+        }));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert!(app.busy);
+        assert_eq!(app.status, "Renaming @alice → bob across the sheet...");
+    }
+
+    // ---------- Assist modal: query -> result, then optional grant ----------
+
+    #[test]
+    fn assist_query_empty_shows_a_hint_and_stays_on_query_step() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        app.modal = Some(Modal::Assist(assist_modal("alice", "", AssistStep::Query)));
+        app.handle_key(key(KeyCode::Enter));
+        match &app.modal {
+            Some(Modal::Assist(assist)) => assert!(matches!(assist.step, AssistStep::Query)),
+            other => panic!("expected Assist modal still on Query step, got {other:?}"),
+        }
+        assert_eq!(app.status, "Enter an award request (MCAB / MCIB / MCMB)");
+    }
+
+    #[test]
+    fn assist_query_approve_advances_to_result_with_grant_enabled() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(awards_data_with(
+            "alice",
+            vec![
+                award("Expert Soldier Badge", "Expert Soldier Badge", "Badges Database", "D", 10, "alice"),
+                award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice"),
+            ],
+        ));
+        app.modal = Some(Modal::Assist(assist_modal("alice", "MCAB", AssistStep::Query)));
+        app.handle_key(key(KeyCode::Enter));
+        match &app.modal {
+            Some(Modal::Assist(assist)) => {
+                assert!(matches!(assist.step, AssistStep::Result));
+                assert!(assist.can_grant);
+                assert!(assist.grant.is_some());
+            }
+            other => panic!("expected Assist modal in Result step, got {other:?}"),
+        }
+        assert!(app.status.contains("Eligible"));
+    }
+
+    #[test]
+    fn assist_query_deny_advances_to_result_without_grant() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(awards_data_with(
+            "alice",
+            vec![award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice")],
+        ));
+        app.modal = Some(Modal::Assist(assist_modal("alice", "MCAB", AssistStep::Query)));
+        app.handle_key(key(KeyCode::Enter));
+        match &app.modal {
+            Some(Modal::Assist(assist)) => {
+                assert!(matches!(assist.step, AssistStep::Result));
+                assert!(!assist.can_grant);
+                assert!(assist.grant.is_none());
+            }
+            other => panic!("expected Assist modal in Result step, got {other:?}"),
+        }
+        assert_eq!(app.status, "Assist result — Esc to close");
+    }
+
+    #[test]
+    fn assist_result_enter_without_can_grant_is_a_no_op() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        app.status = "unchanged".into();
+        let mut assist = assist_modal("alice", "MCAB", AssistStep::Result);
+        assist.report = "DENY ...".into();
+        app.modal = Some(Modal::Assist(assist));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.modal.is_some(), "modal should stay open when nothing can be granted");
+        assert!(!app.busy);
+        assert_eq!(app.status, "unchanged");
+    }
+
+    #[test]
+    fn assist_result_scroll_is_saturating_and_moves_with_j_k() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        app.modal = Some(Modal::Assist(assist_modal("alice", "MCAB", AssistStep::Result)));
+        app.handle_key(key(KeyCode::Up)); // saturating_sub(1) from 0 stays 0
+        match &app.modal {
+            Some(Modal::Assist(assist)) => assert_eq!(assist.scroll, 0),
+            other => panic!("expected Assist modal, got {other:?}"),
+        }
+        app.handle_key(key(KeyCode::Char('j')));
+        match &app.modal {
+            Some(Modal::Assist(assist)) => assert_eq!(assist.scroll, 1),
+            other => panic!("expected Assist modal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assist_result_enter_with_can_grant_commits_the_grant_and_closes_modal() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(awards_data_with(
+            "alice",
+            vec![
+                award("Expert Soldier Badge", "Expert Soldier Badge", "Badges Database", "D", 10, "alice"),
+                award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice"),
+            ],
+        ));
+        let mut assist = assist_modal("alice", "MCAB", AssistStep::Result);
+        assist.can_grant = true;
+        assist.grant = Some(GrantPlan::UpgradeCell {
+            base_name: "Combat Action Badge".into(),
+            new_cell: "alice - MC".into(),
+        });
+        app.modal = Some(Modal::Assist(assist));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none(), "granting should close the Assist modal");
+        assert!(app.busy, "granting dispatches a sheet write (via commit_edit)");
+    }
+
+    // ---------- Audit modal: scroll only, Esc handled above ----------
+
+    #[test]
+    fn audit_modal_scroll_keys_clamp_and_jump() {
+        let (mut app, _rx) = test_app();
+        let lines: Vec<String> = (0..20).map(|i| format!("line {i}")).collect();
+        app.modal = Some(Modal::Audit(AuditModal {
+            path: "audits/audit-x.txt".into(),
+            lines: lines.clone(),
+            scroll: 5,
+        }));
+        app.handle_key(key(KeyCode::PageUp));
+        match &app.modal {
+            Some(Modal::Audit(a)) => assert_eq!(a.scroll, 0, "5.saturating_sub(10) == 0"),
+            other => panic!("expected Audit modal, got {other:?}"),
+        }
+        if let Some(Modal::Audit(a)) = app.modal.as_mut() {
+            a.scroll = 5;
+        }
+        app.handle_key(key(KeyCode::PageDown));
+        match &app.modal {
+            Some(Modal::Audit(a)) => assert_eq!(a.scroll, 15),
+            other => panic!("expected Audit modal, got {other:?}"),
+        }
+        app.handle_key(key(KeyCode::End));
+        match &app.modal {
+            Some(Modal::Audit(a)) => assert_eq!(a.scroll, (lines.len() - 1) as u16),
+            other => panic!("expected Audit modal, got {other:?}"),
+        }
+        app.handle_key(key(KeyCode::Home));
+        match &app.modal {
+            Some(Modal::Audit(a)) => assert_eq!(a.scroll, 0),
+            other => panic!("expected Audit modal, got {other:?}"),
+        }
+    }
+
+    // ---------- Full pipeline: keypress opens the right modal ----------
+
+    #[test]
+    fn c_key_opens_assist_modal_prefilled_with_mcab() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        app.results_username = Some("alice".into());
+        app.focus = FocusArea::Awards;
+        app.handle_key(key(KeyCode::Char('c')));
+        match &app.modal {
+            Some(Modal::Assist(assist)) => {
+                assert_eq!(assist.username, "alice");
+                assert!(matches!(assist.step, AssistStep::Query));
+                assert_eq!(assist.input.value(), "MCAB");
+            }
+            other => panic!("expected Assist modal to open, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn c_key_is_ignored_while_focus_is_on_the_username_field() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        app.results_username = Some("alice".into());
+        // Default focus is Username; 'c' should be typed into the field, not open Assist.
+        app.handle_key(key(KeyCode::Char('c')));
+        assert!(app.modal.is_none());
+        assert_eq!(app.username.value(), "c");
+    }
+}

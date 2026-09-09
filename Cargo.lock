@@ -127,7 +127,6 @@ dependencies = [
 name = "awards-sheets"
 version = "2.3.0"
 dependencies = [
- "anyhow",
  "awards-core",
  "chrono",
  "csv",
