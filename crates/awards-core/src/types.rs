@@ -53,6 +53,15 @@ pub struct AwardDef {
     pub base_name: String,
 }
 
+/// Username/award-name candidates parsed from a pasted Discord request message
+/// (`crate::parse::extract_paste_fields`). Transient — never persisted or logged; exists only
+/// for the duration of one paste-resolution call. See `003-discord-paste-quick-add/data-model.md`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtractedRequest {
+    pub username: Option<String>,
+    pub award_text: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DuplicateHit {
     pub category: String,
