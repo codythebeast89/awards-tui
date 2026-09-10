@@ -20,3 +20,5 @@ audit-*.txt
 # Rust
 /target/
 **/*.rs.bk
+.claude/skills/
+.specify/
