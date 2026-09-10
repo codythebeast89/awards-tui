@@ -1,8 +1,8 @@
 use crate::{
     config::Theme,
     tui::app::{
-        category_label, AddStep, App, AssistStep, AuditModal, AwardTab, FocusArea, Modal,
-        RenameStep, VisibleAward,
+        category_label, describe_finding, AddStep, App, AssistStep, AuditModal, AuditRow,
+        AuditView, AwardTab, FocusArea, Modal, RenameStep, VisibleAward,
     },
 };
 use awards_core::{normalize_username, AwardDef};
@@ -252,7 +252,7 @@ fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme) {
 fn render_footer(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     frame.render_widget(
         Paragraph::new(
-            "Ctrl+Q quit · Tab focus · Enter/e edit · d delete · a add · n rename · c assist · Audit · F5 · [ ] tabs",
+            "Ctrl+Q quit · Tab focus · Enter/e edit · d delete · a add · n rename · c assist · Audit: Enter fix · F5 · [ ] tabs",
         )
         .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
         area,
@@ -273,7 +273,11 @@ fn render_modal(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme)
             centered_rect(78, 22, area)
         }
         Some(Modal::Assist(_)) => centered_rect(70, 11, area),
-        Some(Modal::Audit(_)) => centered_rect(100, 30, area),
+        Some(Modal::Audit(audit)) => match audit.view {
+            AuditView::Report => centered_rect(100, 30, area),
+            AuditView::List => centered_rect(94, 28, area),
+            AuditView::ChooseUsername { .. } => centered_rect(60, 9, area),
+        },
         None => return,
     };
     frame.render_widget(Clear, modal_area);
@@ -698,9 +702,91 @@ Requested award (e.g. MCAB)", assist.username))
     }
 }
 
+/// Dispatches to whichever face of the Audit modal is currently displayed: the
+/// selectable findings list (default), the plain-text report (still available for
+/// record-keeping — same export as before, unchanged format), or the transient
+/// two-username choice for a `SimilarUsernames` finding.
 fn render_audit_modal(frame: &mut Frame<'_>, audit: &mut AuditModal, area: Rect, theme: &Theme) {
+    match audit.view.clone() {
+        AuditView::List => render_audit_findings_list(frame, audit, area, theme),
+        AuditView::Report => render_audit_report_view(frame, audit, area, theme),
+        AuditView::ChooseUsername { a, b } => {
+            render_audit_choose_username(frame, &a, &b, area, theme)
+        }
+    }
+}
+
+fn render_audit_findings_list(
+    frame: &mut Frame<'_>,
+    audit: &mut AuditModal,
+    area: Rect,
+    theme: &Theme,
+) {
     let block = Block::default()
-        .title(format!(" Audit Browser · {} ", audit.path))
+        .title(format!(
+            " Audit Findings · {} open · {} ",
+            audit.list.len(),
+            audit.path
+        ))
+        .borders(Borders::ALL)
+        .style(Style::default().fg(theme.text).bg(theme.panel_alt))
+        .border_style(theme.purple);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    let items: Vec<ListItem<'_>> = if audit.list.is_empty() {
+        vec![ListItem::new(Span::styled(
+            "No open findings — everything checked out clean.",
+            Style::default().fg(theme.muted),
+        ))]
+    } else {
+        audit
+            .list
+            .rows_for_render()
+            .into_iter()
+            .map(|row| match row {
+                AuditRow::Header(label) => ListItem::new(Span::styled(
+                    label,
+                    Style::default().fg(theme.purple).add_modifier(Modifier::BOLD),
+                )),
+                AuditRow::Item(finding) => ListItem::new(Span::styled(
+                    format!("  {}", describe_finding(finding)),
+                    Style::default().fg(theme.text),
+                )),
+            })
+            .collect()
+    };
+
+    let list = List::new(items)
+        .highlight_style(
+            Style::default()
+                .fg(theme.text)
+                .bg(theme.highlight_bg)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("› ");
+    frame.render_stateful_widget(list, chunks[0], &mut audit.list_state);
+
+    frame.render_widget(
+        Paragraph::new("↑/↓ j/k move · Enter fix · Tab report view · Esc close")
+            .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
+        chunks[1],
+    );
+}
+
+fn render_audit_report_view(
+    frame: &mut Frame<'_>,
+    audit: &mut AuditModal,
+    area: Rect,
+    theme: &Theme,
+) {
+    let block = Block::default()
+        .title(format!(" Audit Report · {} ", audit.path))
         .borders(Borders::ALL)
         .style(Style::default().fg(theme.text).bg(theme.panel_alt))
         .border_style(theme.purple);
@@ -729,9 +815,45 @@ fn render_audit_modal(frame: &mut Frame<'_>, audit: &mut AuditModal, area: Rect,
         chunks[0],
     );
     frame.render_widget(
-        Paragraph::new("↑/↓ j/k scroll · PgUp/PgDn · Esc close")
+        Paragraph::new("↑/↓ j/k scroll · PgUp/PgDn · Tab findings list · Esc close")
             .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
         chunks[1],
+    );
+}
+
+fn render_audit_choose_username(
+    frame: &mut Frame<'_>,
+    a: &str,
+    b: &str,
+    area: Rect,
+    theme: &Theme,
+) {
+    let block = Block::default()
+        .title(" Similar usernames — which is the typo? ")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(theme.text).bg(theme.panel_alt))
+        .border_style(theme.purple);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("1  @{a}"),
+            Style::default().fg(theme.text),
+        )),
+        Line::from(Span::styled(
+            format!("2  @{b}"),
+            Style::default().fg(theme.text),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Press 1 or 2 to pick the account to rename · Esc back to list",
+            Style::default().fg(theme.muted),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(theme.text).bg(theme.panel)),
+        inner,
     );
 }
 

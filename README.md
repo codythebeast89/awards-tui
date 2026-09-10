@@ -87,7 +87,16 @@ Purple dark layout: username bar, fixed **Actions** pane, tabbed **Awards** list
 | Ctrl+Q | Quit |
 | Esc | Cancel modal / close audit browser |
 
-Actions → **Audit** opens an in-app report browser (also writes `audits/audit-*.txt`). In the browser: ↑/↓ or j/k, PgUp/PgDn, Home/End, Esc.
+Actions → **Audit** opens a selectable findings list (also writes the plain-text report to
+`audits/audit-*.txt`, unchanged, for record-keeping). Findings are grouped by the username
+involved. In the findings list: ↑/↓ or j/k, PgUp/PgDn to move, **Enter** to jump straight into
+the matching fix (Delete for a duplicate row, Edit for a malformed cell, or a 1/2 username choice
+then Rename for similar usernames — an unparseable cell has no direct fix and stays listed for
+manual review), **Tab** to switch to the plain-text report view, Esc to close. In the report view:
+↑/↓ or j/k, PgUp/PgDn, Home/End, Tab back to the findings list, Esc to close. Fixing a finding
+writes through the same OAuth-gated live-sheet path as the regular Edit/Delete/Rename actions and
+re-checks the audit locally afterward, so a resolved finding drops off the list without a manual
+re-run; Esc while fixing a finding returns to the findings list instead of closing everything.
 
 Award tabs: All / Badges / Ribbons / Foreign / Duplicates/Typos. Duplicates and typos appear in **red** on **All**.
 

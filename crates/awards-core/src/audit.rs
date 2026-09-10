@@ -537,3 +537,298 @@ pub fn format_audit_report(report: &AuditReport, generated_at: &str) -> String {
     lines.push(String::new());
     lines.join("\n")
 }
+
+/// One individually selectable issue surfaced by [`collect_sheet_audit`] — a thin, I/O-free view
+/// over [`AuditReport`]'s four finding kinds. See `flatten_audit_findings`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuditFinding {
+    DuplicateRow {
+        user: String,
+        sheet: String,
+        col: String,
+        base_name: String,
+        /// "identical" | "conflict" — mirrors `AuditDuplicateGroup::kind`.
+        kind: String,
+        row: i32,
+        cell: String,
+    },
+    SimilarUsernames {
+        a: String,
+        b: String,
+        sheet: String,
+        col: String,
+        base_name: String,
+    },
+    MalformedCell {
+        user: String,
+        sheet: String,
+        col: String,
+        base_name: String,
+        row: i32,
+        cell: String,
+        issues: Vec<String>,
+    },
+    UnparseableCell {
+        sheet: String,
+        col: String,
+        base_name: String,
+        row: i32,
+        cell: String,
+    },
+}
+
+/// Flatten an [`AuditReport`] into individually selectable [`AuditFinding`]s: one
+/// `DuplicateRow` per row in each duplicate group (a 3-row group yields 3 findings), and one
+/// `SimilarUsernames` / `MalformedCell` / `UnparseableCell` per corresponding report entry.
+/// Order is stable and follows the report's own section order (duplicates, similar, malformed,
+/// unparsed), so the plain-text report and the selectable list agree.
+pub fn flatten_audit_findings(report: &AuditReport) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    for group in &report.duplicate_groups {
+        for (row, cell) in &group.rows {
+            findings.push(AuditFinding::DuplicateRow {
+                user: group.user.clone(),
+                sheet: group.sheet.clone(),
+                col: group.col.clone(),
+                base_name: group.base_name.clone(),
+                kind: group.kind.clone(),
+                row: *row,
+                cell: cell.clone(),
+            });
+        }
+    }
+    for pair in &report.similar_pairs {
+        findings.push(AuditFinding::SimilarUsernames {
+            a: pair.a.clone(),
+            b: pair.b.clone(),
+            sheet: pair.sheet.clone(),
+            col: pair.col.clone(),
+            base_name: pair.base_name.clone(),
+        });
+    }
+    for malformed in &report.malformed {
+        findings.push(AuditFinding::MalformedCell {
+            // Always Some: collect_sheet_audit only records a malformed entry for a cell that
+            // already parsed to a username (an unparseable cell goes to `unparsed` instead).
+            user: normalize_username(Some(&malformed.cell)).unwrap_or_default(),
+            sheet: malformed.sheet.clone(),
+            col: malformed.col.clone(),
+            base_name: malformed.base_name.clone(),
+            row: malformed.row,
+            cell: malformed.cell.clone(),
+            issues: malformed.issues.clone(),
+        });
+    }
+    for unparsed in &report.unparsed {
+        findings.push(AuditFinding::UnparseableCell {
+            sheet: unparsed.sheet.clone(),
+            col: unparsed.col.clone(),
+            base_name: unparsed.base_name.clone(),
+            row: unparsed.row,
+            cell: unparsed.cell.clone(),
+        });
+    }
+    findings
+}
+
+/// The member a finding concerns, for grouping (see `data-model.md`). `None` only for
+/// `UnparseableCell`, which has no extractable username (FR-009) — every other kind always
+/// carries one.
+pub fn finding_username(finding: &AuditFinding) -> Option<&str> {
+    match finding {
+        AuditFinding::DuplicateRow { user, .. } => Some(user.as_str()),
+        // The pair is shown together regardless; `a` is used only as the default grouping key.
+        AuditFinding::SimilarUsernames { a, .. } => Some(a.as_str()),
+        AuditFinding::MalformedCell { user, .. } => Some(user.as_str()),
+        AuditFinding::UnparseableCell { .. } => None,
+    }
+}
+
+#[cfg(test)]
+mod finding_tests {
+    use super::*;
+
+    fn sample_report() -> AuditReport {
+        AuditReport {
+            cells: 10,
+            columns: 3,
+            duplicate_groups: vec![AuditDuplicateGroup {
+                user: "alice".to_string(),
+                sheet: "Badges Database".to_string(),
+                col: "C".to_string(),
+                base_name: "Test Badge".to_string(),
+                kind: "identical".to_string(),
+                rows: vec![
+                    (5, "alice".to_string()),
+                    (6, "alice".to_string()),
+                    (7, "alice".to_string()),
+                ],
+            }],
+            similar_pairs: vec![AuditSimilarPair {
+                a: "bob".to_string(),
+                b: "bobb".to_string(),
+                sheet: "Ribbons Database".to_string(),
+                col: "D".to_string(),
+                base_name: "Test Ribbon".to_string(),
+            }],
+            malformed: vec![AuditMalformed {
+                sheet: "Badges Database".to_string(),
+                col: "E".to_string(),
+                base_name: "Another Badge".to_string(),
+                row: 9,
+                cell: "carol -Senior".to_string(),
+                issues: vec!["missing_space_before_dash".to_string()],
+            }],
+            unparsed: vec![AuditUnparsed {
+                sheet: "Foreign Awards Database".to_string(),
+                col: "F".to_string(),
+                base_name: "Foreign Device".to_string(),
+                row: 12,
+                cell: "\"???\"".to_string(),
+            }],
+        }
+    }
+
+    /// Regression pin for spec FR-005 / SC-003 (feature 002-audit-fix-selection): the
+    /// findings-list/fix-selection work must not change `format_audit_report`'s output
+    /// or section order — the plain-text report is still the record-keeping export.
+    /// `format_audit_report` itself was not touched by that feature; this test exists
+    /// so a future change to it fails loudly here rather than silently drifting.
+    #[test]
+    fn format_audit_report_output_is_unchanged_in_shape_and_deterministic() {
+        let report = sample_report();
+        let body = format_audit_report(&report, "2026-01-01 00:00:00 UTC");
+
+        assert!(
+            body.starts_with(
+                "Decorations Database — duplicate audit\n\
+                 Generated: 2026-01-01 00:00:00 UTC\n\
+                 Mode: read-only (no sheet writes)\n\
+                 \n\
+                 SUMMARY\n\
+                 =======\n\
+                 Award columns scanned: 3\n\
+                 Filled cells:          10\n\
+                 Identical copies:      1 groups\n\
+                 Conflicting rows:      0 groups\n\
+                 Similar usernames:     1 pairs (same award column)\n\
+                 Malformed cells:       1\n\
+                 Unparseable cells:     1\n"
+            ),
+            "header/summary block changed:\n{body}"
+        );
+        assert!(body.ends_with("End of report.\n"), "footer changed:\n{body}");
+
+        // Section headers appear, in order, exactly as before.
+        let headers = [
+            "1. Identical copies",
+            "2. Conflicting rows",
+            "3. Similar usernames",
+            "4. Malformed cells",
+            "5. Unparseable cells",
+        ];
+        let mut last_pos = 0;
+        for header in headers {
+            let pos = body[last_pos..]
+                .find(header)
+                .unwrap_or_else(|| panic!("missing section header {header:?} in:\n{body}"))
+                + last_pos;
+            last_pos = pos + header.len();
+        }
+        // The empty (no conflicting-row groups in the fixture) section still says so.
+        let conflicting_title = "2. Conflicting rows";
+        let expected_conflicting_section = format!(
+            "{conflicting_title}\n{}\nSame username appears more than once in the same award column with different cell text.\n\n(none)\n",
+            "-".repeat(conflicting_title.len())
+        );
+        assert!(
+            body.contains(&expected_conflicting_section),
+            "empty-section rendering changed:\n{body}"
+        );
+
+        // No hidden nondeterminism (timestamps aside, which the caller supplies).
+        assert_eq!(
+            body,
+            format_audit_report(&report, "2026-01-01 00:00:00 UTC"),
+            "format_audit_report must be a pure function of its inputs"
+        );
+    }
+
+    #[test]
+    fn flatten_splits_duplicate_group_rows_into_one_finding_each() {
+        let findings = flatten_audit_findings(&sample_report());
+        let dup_rows: Vec<_> = findings
+            .iter()
+            .filter(|f| matches!(f, AuditFinding::DuplicateRow { .. }))
+            .collect();
+        assert_eq!(dup_rows.len(), 3, "a 3-row duplicate group must yield 3 findings");
+    }
+
+    #[test]
+    fn flatten_maps_similar_malformed_unparsed_one_to_one() {
+        let findings = flatten_audit_findings(&sample_report());
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|f| matches!(f, AuditFinding::SimilarUsernames { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|f| matches!(f, AuditFinding::MalformedCell { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|f| matches!(f, AuditFinding::UnparseableCell { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn flatten_is_stable_across_calls() {
+        let report = sample_report();
+        assert_eq!(flatten_audit_findings(&report), flatten_audit_findings(&report));
+    }
+
+    #[test]
+    fn flatten_empty_report_yields_no_findings() {
+        let report = AuditReport {
+            cells: 0,
+            columns: 0,
+            duplicate_groups: vec![],
+            similar_pairs: vec![],
+            malformed: vec![],
+            unparsed: vec![],
+        };
+        assert!(flatten_audit_findings(&report).is_empty());
+    }
+
+    #[test]
+    fn finding_username_is_none_only_for_unparseable_cells() {
+        let findings = flatten_audit_findings(&sample_report());
+        for finding in &findings {
+            let expect_none = matches!(finding, AuditFinding::UnparseableCell { .. });
+            assert_eq!(
+                finding_username(finding).is_none(),
+                expect_none,
+                "{finding:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_row_finding_carries_the_group_username() {
+        let findings = flatten_audit_findings(&sample_report());
+        let dup = findings
+            .iter()
+            .find(|f| matches!(f, AuditFinding::DuplicateRow { .. }))
+            .unwrap();
+        assert_eq!(finding_username(dup), Some("alice"));
+    }
+}

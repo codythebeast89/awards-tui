@@ -1,10 +1,11 @@
 use crate::config::AppConfig;
 use awards_core::{
     awards_excluding_duplicate_rows, check_assist, col_to_index, collect_sheet_audit,
-    find_duplicates_for_user, find_grant_target, flatten_awards_sorted, format_audit_report,
-    get_awards_for_username, normalize_username, owned_award_columns, parse_bare_username,
-    reindex_column_after_delete, row_offset, shift_column_up_in_rows, upsert_award_in_index,
-    AssistVerdict, Award, AwardDef, AwardsData, CATEGORY_LABELS, GrantPlan,
+    find_duplicates_for_user, find_grant_target, finding_username, flatten_audit_findings,
+    flatten_awards_sorted, format_audit_report, get_awards_for_username, normalize_username,
+    owned_award_columns, parse_bare_username, reindex_column_after_delete, row_offset,
+    shift_column_up_in_rows, upsert_award_in_index, AssistVerdict, Award, AwardDef, AuditFinding,
+    AwardsData, CATEGORY_LABELS, GrantPlan,
 };
 use awards_sheets::{
     add_award_to_user, auth_status, award_with_live_row, build_awards_data, project_root,
@@ -52,6 +53,7 @@ pub struct AuditOutcome {
     pub path: String,
     pub body: String,
     pub summary: String,
+    pub findings: Vec<AuditFinding>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +167,198 @@ pub struct AuditModal {
     pub path: String,
     pub lines: Vec<String>,
     pub scroll: u16,
+    /// Which face of the audit browser is currently displayed. Kept as a separate,
+    /// stateless field from `list` so toggling between the findings list and the
+    /// plain-text report never discards the findings list's data.
+    pub view: AuditView,
+    pub list: AuditFindingsList,
+    pub list_state: ListState,
+}
+
+impl AuditModal {
+    /// Build a fresh audit modal defaulted to the findings-list view, selecting the
+    /// first selectable row (if any).
+    pub fn new(path: String, body: &str, findings: Vec<AuditFinding>) -> Self {
+        let list = AuditFindingsList::from_findings(findings);
+        let mut list_state = ListState::default();
+        if !list.is_empty() {
+            list_state.select(list.selectable_rows().first().copied());
+        }
+        Self {
+            path,
+            lines: body.lines().map(str::to_string).collect(),
+            scroll: 0,
+            view: AuditView::List,
+            list,
+            list_state,
+        }
+    }
+}
+
+/// Which face of the Audit modal is currently displayed. `ChooseUsername` is a
+/// transient one-shot sub-dialog used to resolve a `SimilarUsernames` finding into a
+/// single account to rename; it is not preserved across a List/Report toggle.
+#[derive(Debug, Clone)]
+pub enum AuditView {
+    List,
+    Report,
+    ChooseUsername {
+        a: String,
+        b: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct FindingGroup {
+    pub username: Option<String>,
+    pub findings: Vec<AuditFinding>,
+}
+
+/// The audit's flagged entries, grouped by the username/person involved (an
+/// "(unattributed)" group, if present, always sorts last since it has no username to
+/// order by).
+#[derive(Debug, Clone, Default)]
+pub struct AuditFindingsList {
+    pub groups: Vec<FindingGroup>,
+}
+
+/// One rendered row of the findings list: either a non-selectable group header, or a
+/// selectable finding.
+pub enum AuditRow<'a> {
+    Header(String),
+    Item(&'a AuditFinding),
+}
+
+impl AuditFindingsList {
+    pub fn from_findings(findings: Vec<AuditFinding>) -> Self {
+        use std::collections::BTreeMap;
+        let mut named: BTreeMap<String, Vec<AuditFinding>> = BTreeMap::new();
+        let mut unattributed: Vec<AuditFinding> = Vec::new();
+        for finding in findings {
+            match finding_username(&finding) {
+                Some(user) => named.entry(user.to_string()).or_default().push(finding),
+                None => unattributed.push(finding),
+            }
+        }
+        let mut groups: Vec<FindingGroup> = named
+            .into_iter()
+            .map(|(username, findings)| FindingGroup {
+                username: Some(username),
+                findings,
+            })
+            .collect();
+        if !unattributed.is_empty() {
+            groups.push(FindingGroup {
+                username: None,
+                findings: unattributed,
+            });
+        }
+        Self { groups }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.groups.iter().all(|g| g.findings.is_empty())
+    }
+
+    pub fn len(&self) -> usize {
+        self.groups.iter().map(|g| g.findings.len()).sum()
+    }
+
+    /// Rendered rows in display order: one header per non-empty group, followed by its
+    /// findings.
+    pub fn rows_for_render(&self) -> Vec<AuditRow<'_>> {
+        let mut out = Vec::new();
+        for group in &self.groups {
+            let label = match &group.username {
+                Some(user) => format!("@{user}"),
+                None => "(unattributed)".to_string(),
+            };
+            out.push(AuditRow::Header(label));
+            for finding in &group.findings {
+                out.push(AuditRow::Item(finding));
+            }
+        }
+        out
+    }
+
+    /// Row indices (into `rows_for_render`'s order) that hold a finding rather than a
+    /// group header, in display order.
+    pub fn selectable_rows(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut row = 0usize;
+        for group in &self.groups {
+            row += 1; // header row
+            for _ in &group.findings {
+                out.push(row);
+                row += 1;
+            }
+        }
+        out
+    }
+
+    /// The finding at the given row index (into `rows_for_render`'s order), or `None`
+    /// if that row is a header (or out of range).
+    pub fn finding_at_row(&self, row_idx: usize) -> Option<&AuditFinding> {
+        let mut row = 0usize;
+        for group in &self.groups {
+            if row == row_idx {
+                return None;
+            }
+            row += 1;
+            for finding in &group.findings {
+                if row == row_idx {
+                    return Some(finding);
+                }
+                row += 1;
+            }
+        }
+        None
+    }
+}
+
+/// One-line human-readable description of an audit finding, used both in the
+/// selectable findings list and (indirectly) wherever a finding needs a short label.
+pub(crate) fn describe_finding(finding: &AuditFinding) -> String {
+    match finding {
+        AuditFinding::DuplicateRow {
+            base_name,
+            sheet,
+            col,
+            row,
+            kind,
+            ..
+        } => {
+            let label = if kind == "identical" {
+                "duplicate copy"
+            } else {
+                "conflicting rows"
+            };
+            format!("⚠ {base_name} ({label}) · {sheet} {col}{row}")
+        }
+        AuditFinding::MalformedCell {
+            base_name,
+            sheet,
+            col,
+            row,
+            cell,
+            ..
+        } => {
+            format!("⚠ {base_name} (malformed cell \"{cell}\") · {sheet} {col}{row}")
+        }
+        AuditFinding::SimilarUsernames { a, b, base_name, .. } => {
+            format!("⚠ {base_name}: @{a} vs @{b} (similar usernames)")
+        }
+        AuditFinding::UnparseableCell {
+            base_name,
+            sheet,
+            col,
+            row,
+            cell,
+            ..
+        } => {
+            format!("⚠ {base_name} (unparseable \"{cell}\") · {sheet} {col}{row}")
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -234,6 +428,15 @@ pub struct App {
     tx: Sender<WorkerMsg>,
     pending_delete: Option<Award>,
     reconcile_gen: u64,
+    /// The Audit modal, stashed while the clerk works a fix opened from a selected
+    /// finding (`Some` iff `modal` currently holds the Edit/Delete/Rename dialog that
+    /// finding opened). Restored on Esc or on a failed write; discarded (replaced by a
+    /// freshly recomputed audit) on a successful write.
+    saved_audit: Option<AuditModal>,
+    /// Set for the duration of a write that was launched from a selected audit
+    /// finding, so `handle_write_done` can route it through the audit-refresh path
+    /// instead of the normal Lookup-pane update path.
+    audit_fix_username: Option<String>,
 }
 
 impl App {
@@ -267,6 +470,8 @@ impl App {
             tx,
             pending_delete: None,
             reconcile_gen: 0,
+            saved_audit: None,
+            audit_fix_username: None,
         }
     }
 
@@ -303,11 +508,11 @@ impl App {
                 match result {
                     Ok(outcome) => {
                         self.status = outcome.summary.clone();
-                        self.modal = Some(Modal::Audit(AuditModal {
-                            path: outcome.path,
-                            lines: outcome.body.lines().map(str::to_string).collect(),
-                            scroll: 0,
-                        }));
+                        self.modal = Some(Modal::Audit(AuditModal::new(
+                            outcome.path,
+                            &outcome.body,
+                            outcome.findings,
+                        )));
                     }
                     Err(message) => {
                         self.status = format!("Audit failed: {message}");
@@ -415,6 +620,10 @@ impl App {
 
     fn handle_write_done(&mut self, kind: &'static str, result: EditResult, username: String) {
         self.busy = false;
+        if self.audit_fix_username.take().is_some() {
+            self.handle_audit_write_done(kind, result);
+            return;
+        }
         if !result.ok {
             if kind == "rename" && !result.awards.is_empty() {
                 // Partial batch write: apply cells that landed, then surface the error.
@@ -513,6 +722,81 @@ impl App {
         }
     }
 
+    /// Handles the outcome of a write launched from a selected audit finding: on
+    /// success, locally patches `data` the same way the normal `apply_*_result` paths
+    /// do, then recomputes the audit findings from that freshly patched local data
+    /// (no network round-trip needed — `patch_sheet_cell` et al. already keep `data`
+    /// current) and reopens the Audit modal on the refreshed list, so a resolved
+    /// finding drops off. On failure — including a stale-write rejection — `data` is
+    /// left untouched and the stashed Audit modal is restored unchanged, so the list
+    /// the clerk was looking at does not silently drift from what is on the sheet.
+    fn handle_audit_write_done(&mut self, kind: &'static str, result: EditResult) {
+        let saved_path = self.saved_audit.as_ref().map(|modal| modal.path.clone());
+
+        if !result.ok {
+            self.status = format!("{kind} failed: {}", result.message);
+            if kind == "rename" && !result.awards.is_empty() {
+                // Partial batch write: apply the cells that landed before restoring,
+                // same as the normal (non-audit) rename path does.
+                if let Some(data) = self.data.as_mut() {
+                    for award in &result.awards {
+                        upsert_award_in_index(&mut data.index, award);
+                        patch_sheet_cell(data, award);
+                    }
+                }
+            }
+            self.pending_delete = None;
+            if let Some(saved) = self.saved_audit.take() {
+                self.modal = Some(Modal::Audit(saved));
+            }
+            return;
+        }
+
+        if let Some(data) = self.data.as_mut() {
+            match kind {
+                "edit" => {
+                    if let Some(award) = result.award.as_ref() {
+                        upsert_award_in_index(&mut data.index, award);
+                        patch_sheet_cell(data, award);
+                    }
+                }
+                "delete" => {
+                    if let Some(award) = self.pending_delete.take() {
+                        reindex_column_after_delete(&mut data.index, &award.sheet, &award.col, award.row);
+                        if let Some(rows) = data.sheet_rows.get_mut(&award.sheet) {
+                            shift_column_up_in_rows(rows, &award.sheet, &award.col, award.row);
+                        }
+                    }
+                }
+                "rename" => {
+                    for award in &result.awards {
+                        upsert_award_in_index(&mut data.index, award);
+                        patch_sheet_cell(data, award);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.status = result.message;
+        self.saved_audit = None;
+        self.reopen_audit_from_local_data(saved_path.unwrap_or_default());
+    }
+
+    /// Recomputes the audit report from the current in-memory `data` (already patched
+    /// by the caller) and reopens `Modal::Audit` on it, defaulted to the findings-list
+    /// view. Used after a fix applied from a selected finding, so resolved findings
+    /// drop off without a network round-trip.
+    fn reopen_audit_from_local_data(&mut self, path: String) {
+        let Some(data) = self.data.clone() else {
+            return;
+        };
+        let report = collect_sheet_audit(&data);
+        let findings = flatten_audit_findings(&report);
+        let generated = Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string();
+        let body = format_audit_report(&report, &generated);
+        self.modal = Some(Modal::Audit(AuditModal::new(path, &body, findings)));
+    }
+
     fn handle_actions_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up => self.move_action(-1),
@@ -552,34 +836,39 @@ impl App {
 
     fn handle_modal_key(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Esc {
-            let closing_audit = matches!(self.modal, Some(Modal::Audit(_)));
-            self.modal = None;
-            if !closing_audit {
-                self.status = "Dialog cancelled".to_string();
+            if let Some(Modal::Audit(audit)) = self.modal.as_mut() {
+                if matches!(audit.view, AuditView::ChooseUsername { .. }) {
+                    // Back out of the two-username sub-dialog without closing the
+                    // whole Audit browser.
+                    audit.view = AuditView::List;
+                    return;
+                }
+                self.modal = None;
+                // Closing the audit browser must not stomp the summary line left by
+                // the audit run (or by a just-applied fix).
+                return;
             }
+            if self.saved_audit.is_some()
+                && matches!(
+                    self.modal,
+                    Some(Modal::Edit(_)) | Some(Modal::Delete(_)) | Some(Modal::Rename(_))
+                )
+            {
+                // Cancelling a fix that was opened from a selected finding returns to
+                // the audit list rather than closing everything.
+                self.audit_fix_username = None;
+                self.pending_delete = None;
+                self.modal = self.saved_audit.take().map(Modal::Audit);
+                self.status = "Fix cancelled".to_string();
+                return;
+            }
+            self.modal = None;
+            self.status = "Dialog cancelled".to_string();
             return;
         }
 
-        if let Some(Modal::Audit(audit)) = self.modal.as_mut() {
-            match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    audit.scroll = audit.scroll.saturating_sub(1);
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    audit.scroll = audit.scroll.saturating_add(1);
-                }
-                KeyCode::PageUp => {
-                    audit.scroll = audit.scroll.saturating_sub(10);
-                }
-                KeyCode::PageDown => {
-                    audit.scroll = audit.scroll.saturating_add(10);
-                }
-                KeyCode::Home => audit.scroll = 0,
-                KeyCode::End => {
-                    audit.scroll = audit.lines.len().saturating_sub(1) as u16;
-                }
-                _ => {}
-            }
+        if matches!(self.modal, Some(Modal::Audit(_))) {
+            self.handle_audit_modal_key(key);
             return;
         }
 
@@ -755,6 +1044,169 @@ impl App {
         if assist_grant {
             self.commit_assist_grant();
         }
+    }
+
+    /// Key handling while the Audit modal is open: navigation and view-toggle in both
+    /// the findings-list and report views, and picking a username in the transient
+    /// `ChooseUsername` sub-dialog. Esc is handled by the caller before this is
+    /// reached.
+    fn handle_audit_modal_key(&mut self, key: KeyEvent) {
+        let mut open_finding: Option<AuditFinding> = None;
+        let mut choose_username: Option<String> = None;
+
+        if let Some(Modal::Audit(audit)) = self.modal.as_mut() {
+            match audit.view.clone() {
+                AuditView::Report => match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        audit.scroll = audit.scroll.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        audit.scroll = audit.scroll.saturating_add(1);
+                    }
+                    KeyCode::PageUp => {
+                        audit.scroll = audit.scroll.saturating_sub(10);
+                    }
+                    KeyCode::PageDown => {
+                        audit.scroll = audit.scroll.saturating_add(10);
+                    }
+                    KeyCode::Home => audit.scroll = 0,
+                    KeyCode::End => {
+                        audit.scroll = audit.lines.len().saturating_sub(1) as u16;
+                    }
+                    KeyCode::Tab => audit.view = AuditView::List,
+                    _ => {}
+                },
+                AuditView::List => match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        move_audit_row(&audit.list, &mut audit.list_state, -1)
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        move_audit_row(&audit.list, &mut audit.list_state, 1)
+                    }
+                    KeyCode::PageUp => move_audit_row(&audit.list, &mut audit.list_state, -5),
+                    KeyCode::PageDown => move_audit_row(&audit.list, &mut audit.list_state, 5),
+                    KeyCode::Tab => audit.view = AuditView::Report,
+                    KeyCode::Enter => {
+                        if let Some(row) = audit.list_state.selected() {
+                            open_finding = audit.list.finding_at_row(row).cloned();
+                        }
+                    }
+                    _ => {}
+                },
+                AuditView::ChooseUsername { a, b } => match key.code {
+                    KeyCode::Char('1') => choose_username = Some(a),
+                    KeyCode::Char('2') => choose_username = Some(b),
+                    _ => {}
+                },
+            }
+        }
+
+        if let Some(finding) = open_finding {
+            self.open_fix_for_finding(finding);
+        } else if let Some(from) = choose_username {
+            self.open_rename_for_finding(from);
+        }
+    }
+
+    /// Selecting a finding and pressing Enter jumps straight into the existing fix
+    /// flow for that award/cell: Delete for a duplicate row, Edit for a malformed
+    /// cell, and (via `open_rename_for_finding`) Rename for similar usernames. The
+    /// current Audit modal is stashed in `saved_audit` so Esc or a failed write can
+    /// return to it unchanged, and `audit_fix_username` is set so `handle_write_done`
+    /// routes the result back through the audit-refresh path instead of the normal
+    /// Lookup-pane update.
+    fn open_fix_for_finding(&mut self, finding: AuditFinding) {
+        match &finding {
+            AuditFinding::DuplicateRow { .. } => {
+                let Some(award) = finding.to_award() else {
+                    return;
+                };
+                let Some(Modal::Audit(audit)) = self.modal.take() else {
+                    return;
+                };
+                let viewed_username = finding_username(&finding).unwrap_or("?").to_string();
+                self.audit_fix_username = Some(viewed_username.clone());
+                self.saved_audit = Some(audit);
+                self.status = "Type \"delete\" to remove this duplicate row".to_string();
+                self.modal = Some(Modal::Delete(DeleteModal {
+                    award,
+                    input: Input::default(),
+                    viewed_username,
+                }));
+            }
+            AuditFinding::MalformedCell { .. } => {
+                let Some(award) = finding.to_award() else {
+                    return;
+                };
+                let Some(Modal::Audit(audit)) = self.modal.take() else {
+                    return;
+                };
+                let value = if award.cell.is_empty() {
+                    award.name.clone()
+                } else {
+                    award.cell.clone()
+                };
+                self.audit_fix_username = Some(finding_username(&finding).unwrap_or("?").to_string());
+                self.saved_audit = Some(audit);
+                self.status = "Fix the malformed cell, then Enter to save".to_string();
+                self.modal = Some(Modal::Edit(EditModal {
+                    award,
+                    input: input_with_value(value),
+                }));
+            }
+            AuditFinding::SimilarUsernames { a, b, .. } => {
+                if let Some(Modal::Audit(audit)) = self.modal.as_mut() {
+                    audit.view = AuditView::ChooseUsername {
+                        a: a.clone(),
+                        b: b.clone(),
+                    };
+                }
+                self.status = "Which account is the typo? Press 1 or 2".to_string();
+            }
+            AuditFinding::UnparseableCell { .. } => {
+                self.status =
+                    "No direct fix available for this cell — edit it manually on the sheet"
+                        .to_string();
+            }
+        }
+    }
+
+    /// Completes the `SimilarUsernames` two-username choice: opens the standard
+    /// Rename dialog targeting the chosen account, stashing the Audit modal the same
+    /// way `open_fix_for_finding` does. If the chosen account no longer owns any
+    /// sheet cells (e.g. a prior fix already resolved it), the audit list is restored
+    /// unchanged and nothing opens.
+    fn open_rename_for_finding(&mut self, from: String) {
+        let Some(Modal::Audit(audit)) = self.modal.take() else {
+            return;
+        };
+        let cell_count = self
+            .data
+            .as_ref()
+            .map(|data| {
+                get_awards_for_username(&data.index, &from)
+                    .iter()
+                    .filter(|award| {
+                        !award.sheet.is_empty() && !award.col.is_empty() && award.row != 0
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        if cell_count == 0 {
+            self.status = format!("No sheet cells found for @{from}");
+            self.modal = Some(Modal::Audit(audit));
+            return;
+        }
+        self.audit_fix_username = Some(from.clone());
+        self.saved_audit = Some(audit);
+        self.modal = Some(Modal::Rename(RenameModal {
+            from,
+            cell_count,
+            existing_new: 0,
+            input: Input::default(),
+            confirm: Input::default(),
+            step: RenameStep::Name,
+        }));
     }
 
     fn cycle_focus(&mut self, delta: isize) {
@@ -1348,6 +1800,24 @@ fn move_list(state: &mut ListState, len: usize, delta: isize) {
     state.select(Some(next));
 }
 
+/// Wraparound navigation over an `AuditFindingsList`'s selectable rows only — group
+/// header rows are skipped, never selected.
+fn move_audit_row(list: &AuditFindingsList, state: &mut ListState, delta: isize) {
+    let selectable = list.selectable_rows();
+    if selectable.is_empty() {
+        state.select(None);
+        return;
+    }
+    let current_row = state.selected().unwrap_or(selectable[0]);
+    let current_pos = selectable
+        .iter()
+        .position(|&row| row == current_row)
+        .unwrap_or(0);
+    let next_pos =
+        (current_pos as isize + delta).rem_euclid(selectable.len() as isize) as usize;
+    state.select(Some(selectable[next_pos]));
+}
+
 fn auth_note() -> String {
     match auth_status() {
         "service_account" => "write: service account".to_string(),
@@ -1364,6 +1834,7 @@ fn run_audit_worker(data: Option<AwardsData>) -> Result<AuditOutcome, String> {
         None => build_awards_data(None).map_err(|err| err.to_string())?,
     };
     let report = collect_sheet_audit(&data);
+    let findings = flatten_audit_findings(&report);
     let generated = Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string();
     let body = format_audit_report(&report, &generated);
     let stamp = Utc::now().format("%Y-%m-%d_%H%M%S");
@@ -1394,6 +1865,7 @@ fn run_audit_worker(data: Option<AwardsData>) -> Result<AuditOutcome, String> {
         path: dest.display().to_string(),
         body,
         summary,
+        findings,
     })
 }
 
@@ -1483,11 +1955,11 @@ mod tests {
     fn esc_closes_audit_modal_without_overwriting_status() {
         let (mut app, _rx) = test_app();
         app.status = "Wrote audits/audit-x.txt".to_string();
-        app.modal = Some(Modal::Audit(AuditModal {
-            path: "audits/audit-x.txt".into(),
-            lines: vec!["line".into()],
-            scroll: 0,
-        }));
+        app.modal = Some(Modal::Audit(AuditModal::new(
+            "audits/audit-x.txt".into(),
+            "line",
+            Vec::new(),
+        )));
         app.handle_key(key(KeyCode::Esc));
         assert!(app.modal.is_none());
         assert_eq!(
@@ -1881,11 +2353,10 @@ mod tests {
     fn audit_modal_scroll_keys_clamp_and_jump() {
         let (mut app, _rx) = test_app();
         let lines: Vec<String> = (0..20).map(|i| format!("line {i}")).collect();
-        app.modal = Some(Modal::Audit(AuditModal {
-            path: "audits/audit-x.txt".into(),
-            lines: lines.clone(),
-            scroll: 5,
-        }));
+        let mut audit = AuditModal::new("audits/audit-x.txt".into(), &lines.join("\n"), Vec::new());
+        audit.view = AuditView::Report;
+        audit.scroll = 5;
+        app.modal = Some(Modal::Audit(audit));
         app.handle_key(key(KeyCode::PageUp));
         match &app.modal {
             Some(Modal::Audit(a)) => assert_eq!(a.scroll, 0, "5.saturating_sub(10) == 0"),
@@ -1939,5 +2410,239 @@ mod tests {
         app.handle_key(key(KeyCode::Char('c')));
         assert!(app.modal.is_none());
         assert_eq!(app.username.value(), "c");
+    }
+
+    // ---------- Selecting an audit finding jumps into the matching fix flow ----------
+
+    fn duplicate_row_finding() -> AuditFinding {
+        AuditFinding::DuplicateRow {
+            user: "alice".into(),
+            sheet: "Badges Database".into(),
+            col: "C".into(),
+            base_name: "Combat Action Badge".into(),
+            kind: "identical".into(),
+            row: 10,
+            cell: "alice".into(),
+        }
+    }
+
+    fn malformed_cell_finding() -> AuditFinding {
+        AuditFinding::MalformedCell {
+            user: "carol".into(),
+            sheet: "Ribbons Database".into(),
+            col: "D".into(),
+            base_name: "Test Ribbon".into(),
+            row: 12,
+            cell: "carol -Senior".into(),
+            issues: vec!["missing_space_before_dash".into()],
+        }
+    }
+
+    fn similar_usernames_finding() -> AuditFinding {
+        AuditFinding::SimilarUsernames {
+            a: "bob".into(),
+            b: "bobb".into(),
+            sheet: "Badges Database".into(),
+            col: "C".into(),
+            base_name: "Combat Action Badge".into(),
+        }
+    }
+
+    #[test]
+    fn enter_on_duplicate_finding_opens_delete_modal_and_stashes_audit() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        let finding = duplicate_row_finding();
+        app.modal = Some(Modal::Audit(AuditModal::new(
+            "audits/audit-x.txt".into(),
+            "report body",
+            vec![finding.clone()],
+        )));
+        app.handle_key(key(KeyCode::Enter));
+        match &app.modal {
+            Some(Modal::Delete(delete)) => {
+                assert_eq!(delete.award.base_name, "Combat Action Badge");
+                assert_eq!(delete.viewed_username, "alice");
+            }
+            other => panic!("expected Delete modal, got {other:?}"),
+        }
+        assert!(app.saved_audit.is_some(), "the audit list must be stashed for Esc/failure to restore");
+        assert_eq!(app.audit_fix_username.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn enter_on_malformed_finding_opens_edit_modal_prefilled_with_the_cell() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        let finding = malformed_cell_finding();
+        app.modal = Some(Modal::Audit(AuditModal::new(
+            "audits/audit-x.txt".into(),
+            "report body",
+            vec![finding],
+        )));
+        app.handle_key(key(KeyCode::Enter));
+        match &app.modal {
+            Some(Modal::Edit(edit)) => {
+                assert_eq!(edit.award.base_name, "Test Ribbon");
+                assert_eq!(edit.input.value(), "carol -Senior");
+            }
+            other => panic!("expected Edit modal, got {other:?}"),
+        }
+        assert!(app.saved_audit.is_some());
+        assert_eq!(app.audit_fix_username.as_deref(), Some("carol"));
+    }
+
+    #[test]
+    fn esc_from_a_finding_triggered_fix_restores_the_audit_list_unchanged() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        let finding = duplicate_row_finding();
+        app.modal = Some(Modal::Audit(AuditModal::new(
+            "audits/audit-x.txt".into(),
+            "report body",
+            vec![finding],
+        )));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(app.modal, Some(Modal::Delete(_))));
+
+        app.handle_key(key(KeyCode::Esc));
+        match &app.modal {
+            Some(Modal::Audit(audit)) => assert_eq!(audit.list.len(), 1, "the finding is still there"),
+            other => panic!("expected Esc to restore the Audit modal, got {other:?}"),
+        }
+        assert!(app.saved_audit.is_none(), "the stash must be cleared once restored");
+        assert!(app.audit_fix_username.is_none());
+    }
+
+    #[test]
+    fn enter_on_similar_usernames_finding_opens_a_choice_then_rename() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(awards_data_with(
+            "bobb",
+            vec![award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "bobb")],
+        ));
+        let finding = similar_usernames_finding();
+        app.modal = Some(Modal::Audit(AuditModal::new(
+            "audits/audit-x.txt".into(),
+            "report body",
+            vec![finding],
+        )));
+        app.handle_key(key(KeyCode::Enter));
+        match &app.modal {
+            Some(Modal::Audit(audit)) => {
+                assert!(matches!(audit.view, AuditView::ChooseUsername { .. }))
+            }
+            other => panic!("expected the Audit modal to show the username choice, got {other:?}"),
+        }
+
+        app.handle_key(key(KeyCode::Char('2'))); // pick "bobb", the one with sheet cells
+        match &app.modal {
+            Some(Modal::Rename(rename)) => assert_eq!(rename.from, "bobb"),
+            other => panic!("expected Rename modal, got {other:?}"),
+        }
+        assert!(app.saved_audit.is_some());
+    }
+
+    #[test]
+    fn esc_from_the_similar_usernames_choice_returns_to_the_list_not_the_whole_close() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        let finding = similar_usernames_finding();
+        app.modal = Some(Modal::Audit(AuditModal::new(
+            "audits/audit-x.txt".into(),
+            "report body",
+            vec![finding],
+        )));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Audit(ref audit)) if matches!(audit.view, AuditView::ChooseUsername { .. })
+        ));
+
+        app.handle_key(key(KeyCode::Esc));
+        match &app.modal {
+            Some(Modal::Audit(audit)) => assert!(matches!(audit.view, AuditView::List)),
+            other => panic!("expected the Audit modal to still be open on the list, got {other:?}"),
+        }
+    }
+
+    // ---------- A write launched from a selected finding refreshes (or restores) the audit ----------
+
+    #[test]
+    fn successful_write_from_a_finding_reopens_audit_with_a_refreshed_list() {
+        let (mut app, _rx) = test_app();
+        let target = award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice");
+        app.data = Some(awards_data_with("alice", vec![target.clone()]));
+        let finding = duplicate_row_finding();
+        app.modal = Some(Modal::Audit(AuditModal::new(
+            "audits/audit-x.txt".into(),
+            "report body",
+            vec![finding],
+        )));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(app.modal, Some(Modal::Delete(_))));
+
+        app.handle_worker_msg(WorkerMsg::WriteDone {
+            kind: "delete",
+            result: EditResult {
+                ok: true,
+                message: "Removed Combat Action Badge".to_string(),
+                error: None,
+                award: None,
+                awards: Vec::new(),
+            },
+            username: "alice".into(),
+        });
+
+        match &app.modal {
+            Some(Modal::Audit(audit)) => {
+                assert_eq!(audit.path, "audits/audit-x.txt", "reuses the same export path");
+                assert!(
+                    audit.list.is_empty(),
+                    "no sheet rows means nothing left to audit after the local patch"
+                );
+            }
+            other => panic!("expected the write to reopen the Audit modal, got {other:?}"),
+        }
+        assert_eq!(app.status, "Removed Combat Action Badge");
+        assert!(app.saved_audit.is_none());
+        assert!(app.audit_fix_username.is_none());
+    }
+
+    #[test]
+    fn failed_write_from_a_finding_restores_the_saved_audit_unchanged() {
+        let (mut app, _rx) = test_app();
+        let target = award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice");
+        app.data = Some(awards_data_with("alice", vec![target]));
+        let finding = duplicate_row_finding();
+        app.modal = Some(Modal::Audit(AuditModal::new(
+            "audits/audit-x.txt".into(),
+            "report body",
+            vec![finding],
+        )));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(app.modal, Some(Modal::Delete(_))));
+
+        app.handle_worker_msg(WorkerMsg::WriteDone {
+            kind: "delete",
+            result: EditResult {
+                ok: false,
+                message: "row changed on the sheet".to_string(),
+                error: None,
+                award: None,
+                awards: Vec::new(),
+            },
+            username: "alice".into(),
+        });
+
+        match &app.modal {
+            Some(Modal::Audit(audit)) => {
+                assert_eq!(audit.list.len(), 1, "the failed fix must not drop the finding")
+            }
+            other => panic!("expected the failed write to restore the Audit modal, got {other:?}"),
+        }
+        assert_eq!(app.status, "delete failed: row changed on the sheet");
+        assert!(app.saved_audit.is_none());
+        assert!(app.audit_fix_username.is_none());
     }
 }

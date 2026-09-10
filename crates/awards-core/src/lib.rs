@@ -9,7 +9,10 @@ mod meta;
 mod parse;
 mod types;
 
-pub use audit::{collect_sheet_audit, format_audit_report, AuditReport};
+pub use audit::{
+    collect_sheet_audit, finding_username, flatten_audit_findings, format_audit_report,
+    AuditFinding, AuditReport,
+};
 pub use eligibility::{
     check_assist, find_grant_target, parse_assist_award, AssistAward, AssistReminders,
     AssistVerdict, GrantPlan,
