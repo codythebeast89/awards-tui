@@ -40,6 +40,14 @@ fn render_lookup_bar(app: &mut GuiApp, ui: &mut egui::Ui) {
         let look_up_clicked = ui
             .add_enabled(!app.syncing, egui::Button::new("Look Up"))
             .clicked();
+        // 005-gui-refresh: re-runs the same sync the app already performs once at startup, and
+        // is also the clerk's recovery path after a failed startup sync (spec FR-004).
+        if ui
+            .add_enabled(!app.syncing, egui::Button::new("Refresh"))
+            .clicked()
+        {
+            app.start_sync();
+        }
         if app.syncing {
             ui.label("Syncing...");
         }

@@ -6,7 +6,9 @@
 //! Scope for this first GUI milestone (spec 004-gui-lookup-add): Lookup (read-only) and Add
 //! (a single guarded write), nothing else — see spec.md FR-010 for what is deliberately absent.
 
-use awards_core::{get_awards_for_username, match_catalog_entries, owned_award_columns};
+use awards_core::{
+    get_awards_for_username, match_catalog_entries, owned_award_columns, upsert_award_in_index,
+};
 use awards_core::{Award, AwardDef, AwardsData};
 use awards_sheets::{add_award_to_user, auth_status, build_awards_data, login, EditResult};
 use std::sync::mpsc;
@@ -118,13 +120,16 @@ impl GuiApp {
             rx,
             repaint: Box::new(repaint),
             data: None,
-            syncing: true,
+            // Left false here (rather than true) so start_sync()'s own guard against a second
+            // concurrent sync — added for the Refresh feature (005-gui-refresh) — doesn't
+            // mistake this initial construction for a sync already in flight and skip it.
+            syncing: false,
             sync_error: None,
             username_input: String::new(),
             looked_up: None,
             auth: AuthState::Unknown,
             add_picker: None,
-            status: "Syncing...".to_string(),
+            status: String::new(),
         };
         app.refresh_auth_state();
         app.start_sync();
@@ -141,9 +146,15 @@ impl GuiApp {
         };
     }
 
-    /// Kicks off the initial (and any later Refresh) sheet sync on a background thread, mirroring
-    /// `awards-tui`'s `start_sync` (research.md §6).
+    /// Kicks off the initial (and any later Refresh, 005-gui-refresh) sheet sync on a background
+    /// thread, mirroring `awards-tui`'s `start_sync` (research.md §6 of 004-gui-lookup-add).
+    /// A no-op while a sync is already running (005-gui-refresh spec FR-004) — this guard lives
+    /// here rather than only in the Refresh button's enabled state, so the invariant holds no
+    /// matter what ever calls this (005-gui-refresh research.md §2).
     pub fn start_sync(&mut self) {
+        if self.syncing {
+            return;
+        }
         self.syncing = true;
         self.status = "Syncing...".to_string();
         let tx = self.tx.clone();
@@ -197,7 +208,10 @@ impl GuiApp {
             return;
         }
         let Some(data) = self.data.as_ref() else {
-            self.status = "Still syncing — try again shortly".to_string();
+            self.status = match &self.sync_error {
+                Some(err) => format!("Sync failed: {err} — no data to look up"),
+                None => "Still syncing — try again shortly".to_string(),
+            };
             return;
         };
         let username = self.username_input.trim().to_string();
@@ -320,11 +334,19 @@ impl GuiApp {
 
     fn handle_add_done(&mut self, username: String, result: EditResult) {
         if result.ok {
-            if let (Some(looked_up), Some(award)) = (self.looked_up.as_mut(), result.award.clone())
-            {
-                if looked_up.username == username {
-                    looked_up.awards.push(award);
-                    looked_up.not_found = false;
+            if let Some(award) = result.award.as_ref() {
+                // Keep the shared index in sync (mirrors awards-tui's apply_add_result calling
+                // upsert_award_in_index) so a later lookup of this same username — after the
+                // clerk has looked at someone else in between — reflects this add without
+                // waiting for the next full sync (converge finding F1).
+                if let Some(data) = self.data.as_mut() {
+                    upsert_award_in_index(&mut data.index, award);
+                }
+                if let Some(looked_up) = self.looked_up.as_mut() {
+                    if looked_up.username == username {
+                        looked_up.awards.push(award.clone());
+                        looked_up.not_found = false;
+                    }
                 }
             }
             self.add_picker = None;
@@ -459,6 +481,39 @@ mod tests {
         assert_eq!(app.data.unwrap().catalog.len(), 3);
     }
 
+    /// 005-gui-refresh spec FR-004: a second `start_sync()` call while one is already running
+    /// must not spawn a second background fetch. Asserted without any real network access by
+    /// constructing the app with `syncing` already `true` (as if a sync were mid-flight) and
+    /// confirming the guard returns before the repaint callback — and therefore the thread
+    /// spawn just before it — is ever reached.
+    #[test]
+    fn start_sync_is_a_no_op_while_a_sync_is_already_running() {
+        let (repaint, count) = counting_repaint();
+        let mut app = no_data_app();
+        app.repaint = Box::new(repaint);
+        app.syncing = true;
+        let status_before = app.status.clone();
+        app.start_sync();
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        assert_eq!(app.status, status_before);
+    }
+
+    /// 005-gui-refresh spec FR-006: a failed refresh (or the initial sync) must never discard
+    /// data from a previous successful sync.
+    #[test]
+    fn handle_sync_done_err_leaves_previously_synced_data_untouched() {
+        let mut app = no_data_app();
+        app.handle_msg(GuiMsg::SyncDone(Ok(sample_data())));
+        assert!(app.data.is_some());
+        app.handle_msg(GuiMsg::SyncDone(Err("connection dropped".to_string())));
+        assert!(!app.syncing);
+        assert_eq!(app.sync_error.as_deref(), Some("connection dropped"));
+        assert!(
+            app.data.is_some(),
+            "a failed refresh must not blank out previously-synced data"
+        );
+    }
+
     #[test]
     fn handle_sync_done_err_sets_sync_error_and_clears_syncing() {
         let mut app = no_data_app();
@@ -498,6 +553,19 @@ mod tests {
         app.username_input = "torba_f".to_string();
         app.submit_lookup();
         assert!(app.looked_up.is_none());
+    }
+
+    /// Regression test for converge finding F2: after a permanent sync failure, Look Up must not
+    /// claim the sync is still in progress.
+    #[test]
+    fn submit_lookup_after_a_failed_sync_reports_the_failure_not_still_syncing() {
+        let mut app = no_data_app();
+        app.handle_msg(GuiMsg::SyncDone(Err("network down".to_string())));
+        app.username_input = "torba_f".to_string();
+        app.submit_lookup();
+        assert!(app.looked_up.is_none());
+        assert!(app.status.contains("Sync failed"));
+        assert!(!app.status.contains("Still syncing"));
     }
 
     #[test]
@@ -587,6 +655,49 @@ mod tests {
         assert!(app.add_picker.is_none());
         assert_eq!(app.looked_up.unwrap().awards.len(), 2);
         assert_eq!(app.status, "Added Air Assault Badge");
+    }
+
+    /// Regression test for converge finding F1: looking up a different user and then looking the
+    /// original user back up must still show an award added earlier in the session, without
+    /// waiting for a fresh full sync.
+    #[test]
+    fn handle_add_done_ok_keeps_a_later_relookup_of_the_same_user_accurate() {
+        let mut app = no_data_app();
+        let mut data = sample_data();
+        data.index.insert("someone_else".to_string(), Vec::new());
+        app.handle_msg(GuiMsg::SyncDone(Ok(data)));
+        app.username_input = "torba_f".to_string();
+        app.submit_lookup();
+        app.open_add_picker();
+        let candidate = app.add_picker.as_ref().unwrap().candidates[0].clone();
+        app.select(candidate.clone());
+
+        let new_award = award(
+            "badges",
+            "Air Assault Badge",
+            "Badges Database",
+            "D",
+            5,
+            "torba_f",
+        );
+        app.handle_add_done(
+            "torba_f".to_string(),
+            EditResult {
+                ok: true,
+                message: "Added Air Assault Badge".to_string(),
+                error: None,
+                award: Some(new_award),
+                awards: Vec::new(),
+            },
+        );
+
+        // Look at a different user, then come back to torba_f.
+        app.username_input = "someone_else".to_string();
+        app.submit_lookup();
+        app.username_input = "torba_f".to_string();
+        app.submit_lookup();
+
+        assert_eq!(app.looked_up.unwrap().awards.len(), 2);
     }
 
     #[test]

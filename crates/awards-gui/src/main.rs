@@ -27,7 +27,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "FORSCOM Decorations Database",
+        "QMC Decoration Database",
         options,
         Box::new(|cc| {
             let ctx = cc.egui_ctx.clone();
