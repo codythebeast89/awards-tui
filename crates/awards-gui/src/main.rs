@@ -4,6 +4,7 @@
 //! unchanged from `awards-core`/`awards-sheets`, exactly as `awards-tui` already does.
 
 mod app;
+mod theme;
 mod ui;
 
 use app::GuiApp;
@@ -30,6 +31,7 @@ fn main() -> eframe::Result<()> {
         "QMC Decoration Database",
         options,
         Box::new(|cc| {
+            theme::apply(&cc.egui_ctx);
             let ctx = cc.egui_ctx.clone();
             let inner = GuiApp::new(move || ctx.request_repaint());
             Ok(Box::new(Application { inner }))

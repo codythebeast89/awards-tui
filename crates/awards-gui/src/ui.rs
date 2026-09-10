@@ -5,6 +5,7 @@
 //! since this environment cannot open a display; `app.rs`'s tests cover the state this renders.
 
 use crate::app::{AuthState, GuiApp};
+use crate::theme;
 use awards_core::CATEGORY_LABELS;
 use eframe::egui;
 
@@ -18,7 +19,7 @@ pub fn render(app: &mut GuiApp, ui: &mut egui::Ui) {
     });
 
     egui::Panel::bottom("status_bar").show(ui, |ui| {
-        ui.label(app.status.clone());
+        ui.label(egui::RichText::new(app.status.clone()).color(theme::TEXT_MUTED));
     });
 
     egui::CentralPanel::default().show(ui, |ui| {
@@ -95,7 +96,7 @@ fn render_results(app: &mut GuiApp, ui: &mut egui::Ui) {
         if in_category.is_empty() {
             continue;
         }
-        ui.label(egui::RichText::new(*label).strong());
+        ui.label(egui::RichText::new(*label).strong().color(theme::ACCENT));
         for award in in_category {
             ui.label(format!("  • {}", award.name));
         }
