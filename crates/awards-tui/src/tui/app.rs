@@ -1177,9 +1177,15 @@ impl App {
     /// sheet cells (e.g. a prior fix already resolved it), the audit list is restored
     /// unchanged and nothing opens.
     fn open_rename_for_finding(&mut self, from: String) {
-        let Some(Modal::Audit(audit)) = self.modal.take() else {
+        let Some(Modal::Audit(mut audit)) = self.modal.take() else {
             return;
         };
+        // The caller only reaches here from `AuditView::ChooseUsername` (see
+        // `open_fix_for_finding`'s `SimilarUsernames` arm). Reset back to the findings
+        // list before this modal is stashed or restored below, so Esc from the Rename
+        // modal (or a failed rename write) never reopens the Audit modal frozen on the
+        // two-username choice — see constitution Principle III.
+        audit.view = AuditView::List;
         let cell_count = self
             .data
             .as_ref()
@@ -2563,6 +2569,174 @@ mod tests {
         match &app.modal {
             Some(Modal::Audit(audit)) => assert!(matches!(audit.view, AuditView::List)),
             other => panic!("expected the Audit modal to still be open on the list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn esc_from_a_rename_opened_via_similar_usernames_restores_the_list_not_the_choice() {
+        // Regression test (convergence T025): `open_rename_for_finding` used to stash
+        // the Audit modal while its `view` was still `ChooseUsername { .. }`, so Esc
+        // (or a failed rename write) would restore the modal frozen on the
+        // two-username choice instead of the findings list.
+        let (mut app, _rx) = test_app();
+        app.data = Some(awards_data_with(
+            "bobb",
+            vec![award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "bobb")],
+        ));
+        let finding = similar_usernames_finding();
+        app.modal = Some(Modal::Audit(AuditModal::new(
+            "audits/audit-x.txt".into(),
+            "report body",
+            vec![finding],
+        )));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Audit(ref audit)) if matches!(audit.view, AuditView::ChooseUsername { .. })
+        ));
+        app.handle_key(key(KeyCode::Char('2'))); // pick "bobb", the one with sheet cells
+        assert!(matches!(app.modal, Some(Modal::Rename(_))));
+
+        app.handle_key(key(KeyCode::Esc));
+        match &app.modal {
+            Some(Modal::Audit(audit)) => assert!(
+                matches!(audit.view, AuditView::List),
+                "the restored Audit modal must show the findings list, not be stuck on the choice"
+            ),
+            other => panic!("expected Esc to restore the Audit modal, got {other:?}"),
+        }
+        assert!(app.saved_audit.is_none());
+    }
+
+    // ---------- Selecting an UnparseableCell finding has no fix flow to jump into ----------
+
+    #[test]
+    fn enter_on_unparseable_finding_leaves_the_audit_modal_open_unchanged() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        let finding = AuditFinding::UnparseableCell {
+            sheet: "Badges Database".into(),
+            col: "C".into(),
+            base_name: "Combat Action Badge".into(),
+            row: 14,
+            cell: "???".into(),
+        };
+        app.modal = Some(Modal::Audit(AuditModal::new(
+            "audits/audit-x.txt".into(),
+            "report body",
+            vec![finding],
+        )));
+        app.handle_key(key(KeyCode::Enter));
+        match &app.modal {
+            Some(Modal::Audit(audit)) => {
+                assert!(
+                    matches!(audit.view, AuditView::List),
+                    "no sub-dialog or fix flow opens for an unparseable cell"
+                );
+                assert_eq!(audit.list.len(), 1, "the finding is still there — nothing selects it away");
+            }
+            other => panic!("expected the Audit modal to remain open and unchanged, got {other:?}"),
+        }
+        assert!(app.saved_audit.is_none());
+        assert_eq!(
+            app.status,
+            "No direct fix available for this cell — edit it manually on the sheet"
+        );
+    }
+
+    // ---------- Findings-list navigation skips headers and wraps ----------
+
+    #[test]
+    fn navigation_skips_group_headers_and_wraps_across_multiple_groups() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        // "alice" sorts before "carol", so rendered rows are:
+        // [Header(alice), Item(alice), Header(carol), Item(carol)] — rows 1 and 3 are
+        // the only selectable ones; 0 and 2 are headers.
+        let findings = vec![duplicate_row_finding(), malformed_cell_finding()];
+        app.modal = Some(Modal::Audit(AuditModal::new(
+            "audits/audit-x.txt".into(),
+            "report body",
+            findings,
+        )));
+        let selected = |app: &App| match &app.modal {
+            Some(Modal::Audit(audit)) => audit.list_state.selected(),
+            _ => None,
+        };
+        assert_eq!(selected(&app), Some(1), "constructor selects the first selectable row");
+
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(selected(&app), Some(3), "Down skips the carol header row (2)");
+
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(selected(&app), Some(1), "Down from the last finding wraps to the first");
+
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(selected(&app), Some(3), "Up from the first finding wraps to the last");
+
+        app.handle_key(key(KeyCode::PageUp));
+        assert_eq!(selected(&app), Some(1), "PageUp(5) wraps by position, not by row index");
+
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(selected(&app), Some(3), "PageDown(5) wraps back to the last finding");
+    }
+
+    // ---------- Tab toggles between the findings list and the plain-text report ----------
+
+    #[test]
+    fn tab_toggles_list_and_report_without_closing_the_modal_or_discarding_the_list() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        let finding = duplicate_row_finding();
+        app.modal = Some(Modal::Audit(AuditModal::new(
+            "audits/audit-x.txt".into(),
+            "report body",
+            vec![finding],
+        )));
+
+        app.handle_key(key(KeyCode::Tab));
+        match &app.modal {
+            Some(Modal::Audit(audit)) => {
+                assert!(matches!(audit.view, AuditView::Report));
+                assert_eq!(audit.list.len(), 1, "toggling to Report must not discard the findings list");
+            }
+            other => panic!("expected the Audit modal to stay open on Report, got {other:?}"),
+        }
+
+        app.handle_key(key(KeyCode::Tab));
+        match &app.modal {
+            Some(Modal::Audit(audit)) => {
+                assert!(matches!(audit.view, AuditView::List));
+                assert_eq!(audit.list.len(), 1, "toggling back to List must still have the findings list");
+            }
+            other => panic!("expected the Audit modal to stay open on List, got {other:?}"),
+        }
+    }
+
+    // ---------- A fresh audit run always opens on the findings list ----------
+
+    #[test]
+    fn audit_done_success_opens_the_modal_defaulted_to_the_findings_list() {
+        let (mut app, _rx) = test_app();
+        app.modal = None;
+        app.busy = true;
+        app.handle_worker_msg(WorkerMsg::AuditDone(Ok(AuditOutcome {
+            path: "audits/audit-x.txt".into(),
+            body: "report body".into(),
+            summary: "1 finding".into(),
+            findings: vec![duplicate_row_finding()],
+        })));
+        assert!(!app.busy);
+        assert_eq!(app.status, "1 finding");
+        match &app.modal {
+            Some(Modal::Audit(audit)) => {
+                assert!(
+                    matches!(audit.view, AuditView::List),
+                    "a fresh audit must open on the findings list, not the text report"
+                );
+                assert_eq!(audit.list.len(), 1);
+            }
+            other => panic!("expected the Audit modal to open, got {other:?}"),
         }
     }
 

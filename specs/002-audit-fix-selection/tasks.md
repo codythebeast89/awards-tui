@@ -403,3 +403,53 @@ Task: "Add findings-list navigation in crates/awards-tui/src/tui/app.rs"
   requires the existing typed confirmation phrase and OAuth-gated live-sheet write this session's
   standing "DO NOT make any write attempts to the Decorations Database" instruction governs —
   T022's live-write quickstart steps stay unperformed until that instruction is lifted.
+
+---
+
+## Phase 7: Convergence
+
+**Purpose**: Remediate gaps a `/speckit-converge` review found between what shipped for
+User Story 1/3's fix-selection flow and what `spec.md`/`plan.md`/the constitution actually
+require — the Esc/status contract this feature adds to the Audit modal was implemented and
+tested (Phase 3-6) before the constitution was amended to document it, and one of the three
+Esc cases had a real stashed-view bug. Every task below is independently verified against the
+current code (not assumed from a prior finding), then fixed/added and re-verified with the
+full workspace gate.
+
+- [X] T024 Amend `.specify/memory/constitution.md` Principle III to document the three Esc
+      cases the Audit modal now has (list/report close-without-overwrite, ChooseUsername
+      back-to-list, fix-modal restore-with-"Fix cancelled") per Constitution III (contradicts).
+      Bumped `.specify/memory/constitution.md` 1.0.0 → 1.1.0 (MINOR — materially expanded
+      guidance on an existing principle) with an updated Sync Impact Report and Last Amended
+      date; also corrected `specs/002-audit-fix-selection/plan.md`'s Constitution Check row III,
+      which incorrectly asserted this feature didn't change the Esc rule.
+- [X] T025 Fix `open_rename_for_finding` in `crates/awards-tui/src/tui/app.rs` to reset the
+      stashed `AuditModal`'s `view` to `AuditView::List` before it is stashed into
+      `saved_audit` or restored into `self.modal`, per spec.md Edge Cases / FR-010 (partial).
+      Confirmed via code read that both the `cell_count == 0` restore branch and the
+      stash-then-open-Rename branch shared one `audit.view` still set to
+      `ChooseUsername { a, b }` from `open_fix_for_finding`'s `SimilarUsernames` arm; fixed by
+      rebinding `audit` as `mut` and setting `audit.view = AuditView::List` immediately after
+      taking it from `self.modal`, before either branch. Added regression test
+      `esc_from_a_rename_opened_via_similar_usernames_restores_the_list_not_the_choice`.
+- [X] T026 Add a test asserting a successful `WorkerMsg::AuditDone` opens `Modal::Audit`
+      defaulted to `AuditView::List`, per Constitution II (missing — no test previously
+      exercised the initial audit-open path at all). Added
+      `audit_done_success_opens_the_modal_defaulted_to_the_findings_list`.
+- [X] T027 Add a test exercising Up/Down/PageUp/PageDown navigation (`move_audit_row`) across
+      multiple findings/groups, asserting only selectable rows are ever selected and that
+      navigation wraps, per Constitution II (missing). Added
+      `navigation_skips_group_headers_and_wraps_across_multiple_groups` using a two-username,
+      two-group fixture (`alice`/`carol`) to exercise header-skipping and both wrap directions.
+- [X] T028 Add a test asserting `Tab` toggles `AuditModal.view` between `List`/`Report` without
+      closing the modal or discarding `list`, per Constitution II (missing). Added
+      `tab_toggles_list_and_report_without_closing_the_modal_or_discarding_the_list`.
+- [X] T029 Add a test asserting selecting an `UnparseableCell` finding via Enter leaves
+      `self.modal` as `Modal::Audit` unchanged, per FR-009 (missing). Added
+      `enter_on_unparseable_finding_leaves_the_audit_modal_open_unchanged`, also covering the
+      existing status-line message for that case.
+
+Full workspace gate (`cargo build --workspace --locked`, `cargo test --workspace --locked`,
+`cargo clippy --workspace --locked -- -D warnings`) re-run clean after T024-T029: 81 tests
+passed across `awards-core`/`awards-sheets`/`awards-tui` (1 pre-existing `#[ignore]`d live-network
+test unaffected), zero clippy warnings.
