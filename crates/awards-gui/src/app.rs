@@ -10,7 +10,9 @@ use awards_core::{
     get_awards_for_username, match_catalog_entries, owned_award_columns, upsert_award_in_index,
 };
 use awards_core::{Award, AwardDef, AwardsData};
-use awards_sheets::{add_award_to_user, auth_status, build_awards_data, login, EditResult};
+use awards_sheets::{
+    add_award_to_user, auth_status, build_awards_data, login, update_award_cell, EditResult,
+};
 use std::sync::mpsc;
 use std::thread;
 
@@ -40,6 +42,10 @@ pub enum GuiMsg {
     SyncDone(Result<AwardsData, String>),
     LoginDone(Result<String, String>),
     AddDone {
+        username: String,
+        result: EditResult,
+    },
+    EditDone {
         username: String,
         result: EditResult,
     },
@@ -85,6 +91,20 @@ impl AddPicker {
     }
 }
 
+/// The in-progress edit flow (spec 007-gui-edit) — `Some` only while a single award's cell is
+/// being corrected, mirroring `AddPicker`'s "exists only while open" shape and `awards-tui`'s own
+/// `Modal::Edit` (`EditModal { award, input }`, `crates/awards-tui/src/tui/app.rs`).
+#[derive(Debug, Clone)]
+pub struct EditFlow {
+    /// The award this flow is correcting — fixed for the life of the flow; only `input` changes.
+    pub award: Award,
+    /// Pre-filled from `award.cell` (or `award.name` if `cell` is empty) when the flow opens,
+    /// matching the TUI's own `action_edit` prefill (research.md §2) — then free-typed.
+    pub input: String,
+    /// `true` while `update_award_cell` is running on a background thread.
+    pub submitting: bool,
+}
+
 /// The application's entire state. Owned by the `eframe::App` implementation in `main.rs` and
 /// driven by `ui.rs`'s rendering code, but fully constructible and testable with no window.
 pub struct GuiApp {
@@ -104,6 +124,8 @@ pub struct GuiApp {
     pub auth: AuthState,
 
     pub add_picker: Option<AddPicker>,
+
+    pub edit: Option<EditFlow>,
 
     /// One-line status/result message, shown at the bottom of the window.
     pub status: String,
@@ -129,6 +151,7 @@ impl GuiApp {
             looked_up: None,
             auth: AuthState::Unknown,
             add_picker: None,
+            edit: None,
             status: String::new(),
         };
         app.refresh_auth_state();
@@ -180,6 +203,7 @@ impl GuiApp {
             GuiMsg::SyncDone(result) => self.handle_sync_done(result),
             GuiMsg::LoginDone(result) => self.handle_login_done(result),
             GuiMsg::AddDone { username, result } => self.handle_add_done(username, result),
+            GuiMsg::EditDone { username, result } => self.handle_edit_done(username, result),
         }
     }
 
@@ -235,8 +259,9 @@ impl GuiApp {
                 not_found: false,
             });
         }
-        // A fresh lookup invalidates any in-progress add for the previous user.
+        // A fresh lookup invalidates any in-progress add or edit for the previous user.
         self.add_picker = None;
+        self.edit = None;
     }
 
     // ---- User Story 2: Add ---------------------------------------------------------------------
@@ -261,6 +286,9 @@ impl GuiApp {
             self.status = "No remaining awards to add for this user".to_string();
             return;
         }
+        // Only one in-progress write flow at a time (mirrors the TUI's single-modal rule,
+        // Constitution III) — opening Add closes any open Edit.
+        self.edit = None;
         self.add_picker = Some(AddPicker::new(candidates));
     }
 
@@ -361,6 +389,121 @@ impl GuiApp {
         }
     }
 
+    // ---- User Story 3: Edit (spec 007-gui-edit) ------------------------------------------------
+
+    /// Opens the edit flow for one award already shown in the results (spec FR-001), prefilled
+    /// with its current cell text — or its display name if the cell is somehow empty — exactly
+    /// matching the TUI's own `action_edit` prefill (research.md §2). Closes any open Add picker
+    /// (only one write flow open at a time, Constitution III).
+    pub fn open_edit(&mut self, award: Award) {
+        let value = if award.cell.is_empty() {
+            award.name.clone()
+        } else {
+            award.cell.clone()
+        };
+        self.add_picker = None;
+        self.edit = Some(EditFlow {
+            award,
+            input: value,
+            submitting: false,
+        });
+    }
+
+    pub fn set_edit_input(&mut self, text: String) {
+        if let Some(edit) = self.edit.as_mut() {
+            edit.input = text;
+        }
+    }
+
+    /// Closes the flow with no write — matches the TUI's Esc-cancel outcome (nothing happens).
+    pub fn cancel_edit(&mut self) {
+        self.edit = None;
+    }
+
+    /// `true` only when a confirm is actually actionable right now (spec FR-002). Gated on
+    /// `SignedIn` even though the TUI's own `action_edit`/`commit_edit` has no explicit auth
+    /// check of its own (it just lets the write call fail) — deliberately matching this GUI's
+    /// existing Add-confirm pattern instead, since a windowed app has no always-visible terminal
+    /// line to surface a doomed write's error against; this is a GUI-specific hardening of the
+    /// same underlying rule, not a functional gap (research.md §3).
+    pub fn can_confirm_edit(&self) -> bool {
+        self.auth == AuthState::SignedIn
+            && self
+                .edit
+                .as_ref()
+                .is_some_and(|e| !e.input.trim().is_empty() && !e.submitting)
+    }
+
+    /// Spawns the background write through the exact same guarded path
+    /// (`update_award_cell(.., interactive_auth: false)`) the terminal tool's own Edit flow uses
+    /// (research.md §2) — no new or differently-guarded write path.
+    pub fn confirm_edit(&mut self) {
+        if !self.can_confirm_edit() {
+            return;
+        }
+        let Some(username) = self.looked_up.as_ref().map(|u| u.username.clone()) else {
+            return;
+        };
+        let Some(edit) = self.edit.as_mut() else {
+            return;
+        };
+        let award = edit.award.clone();
+        let new_cell = edit.input.trim().to_string();
+        edit.submitting = true;
+
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let result = update_award_cell(&award, &new_cell, false);
+            let _ = tx.send(GuiMsg::EditDone { username, result });
+        });
+        (self.repaint)();
+    }
+
+    /// On success, patches the shared index (mirrors `upsert_award_in_index` in `handle_add_done`
+    /// and the TUI's own `apply_edit_result`) and then *recomputes* the viewed user's award list
+    /// from that patched index — rather than hand-patching one entry, like `handle_add_done`
+    /// does — because an edit can reassign a cell to a different username (the underlying
+    /// `update_award_cell` guards against a live collision but still allows a deliberate
+    /// reassignment); recomputing is what correctly drops the award from this view when that
+    /// happens, matching the TUI's `apply_edit_result` "no longer under @user" behavior
+    /// (research.md §2) without duplicating its username-comparison logic.
+    fn handle_edit_done(&mut self, viewed_username: String, result: EditResult) {
+        if result.ok {
+            let mut moved_away = false;
+            if let Some(award) = result.award.as_ref() {
+                if let Some(data) = self.data.as_mut() {
+                    upsert_award_in_index(&mut data.index, award);
+                }
+                if let Some(looked_up) = self.looked_up.as_mut() {
+                    if looked_up.username == viewed_username {
+                        if let Some(data) = self.data.as_ref() {
+                            looked_up.awards =
+                                get_awards_for_username(&data.index, &viewed_username);
+                            looked_up.not_found = looked_up.awards.is_empty();
+                            moved_away = !looked_up
+                                .awards
+                                .iter()
+                                .any(|a| a.sheet == award.sheet && a.col == award.col);
+                        }
+                    }
+                }
+            }
+            self.edit = None;
+            self.status = if moved_away {
+                format!("{} · no longer under @{viewed_username}", result.message)
+            } else {
+                result.message
+            };
+        } else {
+            // Stale/Conflict/Validation/etc: refuse and let the clerk retry without losing their
+            // in-progress edit, matching Add's own refusal handling.
+            if let Some(edit) = self.edit.as_mut() {
+                edit.submitting = false;
+            }
+            self.status = result.message;
+        }
+    }
+
     // ---- Sign-in (research.md §4) --------------------------------------------------------------
 
     pub fn start_sign_in(&mut self) {
@@ -444,6 +587,7 @@ mod tests {
             looked_up: None,
             auth: AuthState::Unknown,
             add_picker: None,
+            edit: None,
             status: String::new(),
         }
     }
@@ -797,5 +941,270 @@ mod tests {
         app.cancel_add();
         assert!(app.add_picker.is_none());
         assert_eq!(app.looked_up.unwrap().awards.len(), 1);
+    }
+
+    // ---- 007-gui-edit -------------------------------------------------------------------------
+
+    #[test]
+    fn open_edit_prefills_input_from_the_cell_when_present() {
+        let mut app = no_data_app();
+        app.handle_msg(GuiMsg::SyncDone(Ok(sample_data())));
+        app.username_input = "torba_f".to_string();
+        app.submit_lookup();
+        let existing = app.looked_up.as_ref().unwrap().awards[0].clone();
+        app.open_edit(existing.clone());
+        let edit = app.edit.expect("edit flow should open");
+        assert_eq!(edit.input, existing.cell);
+        assert!(!edit.submitting);
+    }
+
+    #[test]
+    fn open_edit_falls_back_to_the_name_when_the_cell_is_empty() {
+        let mut app = no_data_app();
+        let blank_cell = award(
+            "badges",
+            "Army Parachutist Badge",
+            "Badges Database",
+            "C",
+            5,
+            "",
+        );
+        app.open_edit(blank_cell.clone());
+        assert_eq!(app.edit.unwrap().input, blank_cell.name);
+    }
+
+    #[test]
+    fn open_edit_closes_any_open_add_picker() {
+        let mut app = no_data_app();
+        app.handle_msg(GuiMsg::SyncDone(Ok(sample_data())));
+        app.username_input = "torba_f".to_string();
+        app.submit_lookup();
+        app.open_add_picker();
+        assert!(app.add_picker.is_some());
+        let existing = app.looked_up.as_ref().unwrap().awards[0].clone();
+        app.open_edit(existing);
+        assert!(app.add_picker.is_none());
+        assert!(app.edit.is_some());
+    }
+
+    #[test]
+    fn open_add_picker_closes_any_open_edit() {
+        let mut app = no_data_app();
+        app.handle_msg(GuiMsg::SyncDone(Ok(sample_data())));
+        app.username_input = "torba_f".to_string();
+        app.submit_lookup();
+        let existing = app.looked_up.as_ref().unwrap().awards[0].clone();
+        app.open_edit(existing);
+        assert!(app.edit.is_some());
+        app.open_add_picker();
+        assert!(app.edit.is_none());
+        assert!(app.add_picker.is_some());
+    }
+
+    #[test]
+    fn set_edit_input_updates_the_field() {
+        let mut app = no_data_app();
+        let existing = award(
+            "badges",
+            "Army Parachutist Badge",
+            "Badges Database",
+            "C",
+            5,
+            "torba_f",
+        );
+        app.open_edit(existing);
+        app.set_edit_input("torba_f x2".to_string());
+        assert_eq!(app.edit.unwrap().input, "torba_f x2");
+    }
+
+    #[test]
+    fn cancel_edit_drops_the_flow_with_no_side_effect() {
+        let mut app = no_data_app();
+        app.handle_msg(GuiMsg::SyncDone(Ok(sample_data())));
+        app.username_input = "torba_f".to_string();
+        app.submit_lookup();
+        let existing = app.looked_up.as_ref().unwrap().awards[0].clone();
+        app.open_edit(existing);
+        app.cancel_edit();
+        assert!(app.edit.is_none());
+        assert_eq!(app.looked_up.unwrap().awards.len(), 1);
+    }
+
+    #[test]
+    fn can_confirm_edit_false_without_an_open_edit() {
+        let mut app = no_data_app();
+        app.auth = AuthState::SignedIn;
+        assert!(!app.can_confirm_edit());
+    }
+
+    #[test]
+    fn can_confirm_edit_false_when_not_signed_in() {
+        let mut app = no_data_app();
+        let existing = award(
+            "badges",
+            "Army Parachutist Badge",
+            "Badges Database",
+            "C",
+            5,
+            "torba_f",
+        );
+        app.open_edit(existing);
+        app.auth = AuthState::SignedOut;
+        assert!(!app.can_confirm_edit());
+    }
+
+    #[test]
+    fn can_confirm_edit_false_with_a_blank_input() {
+        let mut app = no_data_app();
+        let existing = award(
+            "badges",
+            "Army Parachutist Badge",
+            "Badges Database",
+            "C",
+            5,
+            "torba_f",
+        );
+        app.open_edit(existing);
+        app.auth = AuthState::SignedIn;
+        app.set_edit_input("   ".to_string());
+        assert!(!app.can_confirm_edit());
+    }
+
+    #[test]
+    fn confirm_edit_is_a_no_op_when_not_signed_in() {
+        let (repaint, count) = counting_repaint();
+        let mut app = no_data_app();
+        app.repaint = Box::new(repaint);
+        let existing = award(
+            "badges",
+            "Army Parachutist Badge",
+            "Badges Database",
+            "C",
+            5,
+            "torba_f",
+        );
+        app.open_edit(existing);
+        app.auth = AuthState::SignedOut;
+        app.confirm_edit();
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        assert!(!app.edit.unwrap().submitting);
+    }
+
+    #[test]
+    fn handle_edit_done_ok_updates_the_awards_cell_text_in_place() {
+        let mut app = no_data_app();
+        app.handle_msg(GuiMsg::SyncDone(Ok(sample_data())));
+        app.username_input = "torba_f".to_string();
+        app.submit_lookup();
+        let existing = app.looked_up.as_ref().unwrap().awards[0].clone();
+        app.open_edit(existing.clone());
+        app.auth = AuthState::SignedIn;
+        app.set_edit_input("torba_f x2".to_string());
+        app.confirm_edit();
+
+        let updated = award(
+            "badges",
+            "Army Parachutist Badge x2",
+            "Badges Database",
+            "C",
+            5,
+            "torba_f x2",
+        );
+        app.handle_edit_done(
+            "torba_f".to_string(),
+            EditResult {
+                ok: true,
+                message: "Updated C5 → torba_f x2".to_string(),
+                error: None,
+                award: Some(updated),
+                awards: Vec::new(),
+            },
+        );
+        assert!(app.edit.is_none());
+        let awards = app.looked_up.unwrap().awards;
+        assert_eq!(awards.len(), 1);
+        assert_eq!(awards[0].cell, "torba_f x2");
+        assert_eq!(app.status, "Updated C5 → torba_f x2");
+    }
+
+    /// When the new cell text reassigns the award to a different username, the viewed user's
+    /// list must drop it (mirrors the TUI's `apply_edit_result` "no longer under @user" case).
+    #[test]
+    fn handle_edit_done_ok_drops_the_award_when_it_moves_to_a_different_user() {
+        let mut app = no_data_app();
+        app.handle_msg(GuiMsg::SyncDone(Ok(sample_data())));
+        app.username_input = "torba_f".to_string();
+        app.submit_lookup();
+        let existing = app.looked_up.as_ref().unwrap().awards[0].clone();
+        app.open_edit(existing);
+        app.auth = AuthState::SignedIn;
+        app.set_edit_input("someone_else".to_string());
+        app.confirm_edit();
+
+        let moved = award(
+            "badges",
+            "Army Parachutist Badge",
+            "Badges Database",
+            "C",
+            5,
+            "someone_else",
+        );
+        app.handle_edit_done(
+            "torba_f".to_string(),
+            EditResult {
+                ok: true,
+                message: "Updated C5 → someone_else".to_string(),
+                error: None,
+                award: Some(moved),
+                awards: Vec::new(),
+            },
+        );
+        let looked_up = app.looked_up.unwrap();
+        assert!(looked_up.awards.is_empty());
+        assert!(looked_up.not_found);
+        assert!(app.status.contains("no longer under @torba_f"));
+    }
+
+    #[test]
+    fn handle_edit_done_failure_keeps_the_flow_open_with_input_intact() {
+        let mut app = no_data_app();
+        app.handle_msg(GuiMsg::SyncDone(Ok(sample_data())));
+        app.username_input = "torba_f".to_string();
+        app.submit_lookup();
+        let existing = app.looked_up.as_ref().unwrap().awards[0].clone();
+        app.open_edit(existing);
+        app.auth = AuthState::SignedIn;
+        app.set_edit_input("torba_f x2".to_string());
+        app.edit.as_mut().unwrap().submitting = true;
+
+        app.handle_edit_done(
+            "torba_f".to_string(),
+            EditResult {
+                ok: false,
+                message: "That cell changed since you looked up this user — refresh and retry"
+                    .to_string(),
+                error: None,
+                award: None,
+                awards: Vec::new(),
+            },
+        );
+        let edit = app.edit.expect("edit flow stays open on a refused write");
+        assert!(!edit.submitting);
+        assert_eq!(edit.input, "torba_f x2");
+        assert_eq!(app.looked_up.unwrap().awards.len(), 1);
+    }
+
+    #[test]
+    fn a_fresh_lookup_closes_any_open_edit() {
+        let mut app = no_data_app();
+        app.handle_msg(GuiMsg::SyncDone(Ok(sample_data())));
+        app.username_input = "torba_f".to_string();
+        app.submit_lookup();
+        let existing = app.looked_up.as_ref().unwrap().awards[0].clone();
+        app.open_edit(existing);
+        assert!(app.edit.is_some());
+        app.username_input = "someone_else".to_string();
+        app.submit_lookup();
+        assert!(app.edit.is_none());
     }
 }
