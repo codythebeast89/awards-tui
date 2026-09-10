@@ -1,3 +1,4 @@
+use crate::types::{AwardDef, ExtractedRequest};
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -164,4 +165,146 @@ pub fn find_first_empty_row(rows: &[Vec<String>], sheet: &str, col: &str) -> i32
         return csv_index_to_sheet_row(sheet, r);
     }
     csv_index_to_sheet_row(sheet, (last_filled + 1) as usize)
+}
+
+/// Label variants recognized for the requester's username line (FR-002), matched
+/// case-insensitively.
+const PASTE_USERNAME_LABELS: &[&str] = &["roblox username", "username"];
+
+/// Label variants recognized for the requested award's line (FR-003), matched
+/// case-insensitively.
+const PASTE_AWARD_LABELS: &[&str] = &["badge requested", "ribbon requested", "award requested"];
+
+/// Split a `Label: value` line into its trimmed, zero-width-stripped halves. Blank lines and
+/// lines with no `:` (or an empty label before it) yield `None`.
+fn split_labeled_line(line: &str) -> Option<(String, String)> {
+    let line = clean_cell(Some(line));
+    if line.is_empty() {
+        return None;
+    }
+    let idx = line.find(':')?;
+    let label = line[..idx].trim().to_string();
+    if label.is_empty() {
+        return None;
+    }
+    let value = line[idx + 1..].trim().to_string();
+    Some((label, value))
+}
+
+/// Strip Discord copy-paste Markdown emphasis (`**bold**`, `__underline__`, `~~strike~~`,
+/// `*italic*`/`_italic_`) that wraps the *entire* trimmed string, edge-only — so a character
+/// that merely appears inside the value (e.g. the `_` in the Roblox username `torba_f`) is left
+/// alone.
+fn strip_paste_artifacts(value: &str) -> String {
+    let mut s = value.trim();
+    loop {
+        let mut stripped = false;
+        for marker in ["**", "__", "~~"] {
+            if s.len() > marker.len() * 2 && s.starts_with(marker) && s.ends_with(marker) {
+                s = s[marker.len()..s.len() - marker.len()].trim();
+                stripped = true;
+            }
+        }
+        for marker in ['*', '_'] {
+            if s.len() > 2 && s.starts_with(marker) && s.ends_with(marker) {
+                s = s[1..s.len() - 1].trim();
+                stripped = true;
+            }
+        }
+        if !stripped {
+            break;
+        }
+    }
+    s.to_string()
+}
+
+/// Extract the requester's username and the requested-award text from a pasted Discord request
+/// message (spec `003-discord-paste-quick-add` FR-002/FR-003). Recognizes a small, documented
+/// set of label variants (`PASTE_USERNAME_LABELS`, `PASTE_AWARD_LABELS`), case-insensitively,
+/// and strips common Markdown/mention copy-paste artifacts before use. When more than one line
+/// matches the same field's label (e.g. two stacked requests or a reply-quote), only the
+/// *first* matching line is used for that field — later ones are ignored outright, not merged
+/// or overwritten. `username` is `None` when no matching line is found, or when the value found
+/// isn't a bare Roblox username per `parse_bare_username`. `award_text` is `None` when no
+/// matching line is found, and is otherwise the raw text after the label — *before*
+/// suffix-splitting (`split_award_suffix`). Never extracts anything from a `Proof:` line, and
+/// neither this function nor the raw pasted text it reads is ever persisted or logged (FR-008,
+/// FR-010).
+pub fn extract_paste_fields(raw: &str) -> ExtractedRequest {
+    let mut username: Option<String> = None;
+    let mut username_line_seen = false;
+    let mut award_text: Option<String> = None;
+    let mut award_line_seen = false;
+
+    for line in raw.lines() {
+        if username_line_seen && award_line_seen {
+            break;
+        }
+        let Some((label, value)) = split_labeled_line(line) else {
+            continue;
+        };
+        let label = strip_paste_artifacts(&label).to_ascii_lowercase();
+        let value = strip_paste_artifacts(&value);
+
+        if !username_line_seen && PASTE_USERNAME_LABELS.contains(&label.as_str()) {
+            username_line_seen = true;
+            username = parse_bare_username(&value);
+        } else if !award_line_seen && PASTE_AWARD_LABELS.contains(&label.as_str()) {
+            award_line_seen = true;
+            if !value.is_empty() {
+                award_text = Some(value);
+            }
+        }
+    }
+
+    ExtractedRequest {
+        username,
+        award_text,
+    }
+}
+
+/// True when `tail` is a repeat/count indicator like `x1`, `x2`, ... — the same convention
+/// `build_cell_value` already recognizes for cell suffixes.
+fn is_count_suffix(tail: &str) -> bool {
+    tail.len() > 1
+        && tail.to_ascii_lowercase().starts_with('x')
+        && tail[1..].chars().all(|c| c.is_ascii_digit())
+}
+
+/// Split a trailing repeat/count indicator (e.g. `"Afghanistan Campaign x1"` →
+/// `("Afghanistan Campaign", "x1")`) off an award-text candidate, per the same `x<digits>`
+/// convention the Decorations Database already uses for cell suffixes (`build_cell_value`).
+/// Returns `(base_name_query, suffix)` with `suffix == ""` when no such token is present.
+pub fn split_award_suffix(text: &str) -> (String, String) {
+    let text = text.trim();
+    if let Some(idx) = text.rfind(char::is_whitespace) {
+        let base = text[..idx].trim();
+        let tail = text[idx + 1..].trim();
+        if is_count_suffix(tail) {
+            return (base.to_string(), tail.to_string());
+        }
+    }
+    (text.to_string(), String::new())
+}
+
+/// Every catalog entry whose award name or category label contains `query`, case-insensitively
+/// — the same predicate the TUI's Add-flow picker already applies to its filter box, factored
+/// out here so both call sites share one implementation instead of drifting apart. An empty
+/// `query` matches everything.
+pub fn match_catalog_entries(catalog: &[AwardDef], query: &str) -> Vec<AwardDef> {
+    let query = query.trim().to_ascii_lowercase();
+    catalog
+        .iter()
+        .filter(|def| {
+            if query.is_empty() || def.base_name.to_ascii_lowercase().contains(&query) {
+                return true;
+            }
+            crate::meta::CATEGORY_LABELS
+                .iter()
+                .find(|(key, _)| *key == def.category)
+                .map(|(_, label)| label.to_ascii_lowercase().contains(&query))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect()
 }

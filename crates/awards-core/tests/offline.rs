@@ -442,3 +442,140 @@ fn test_match_row_in_window() {
     ];
     assert_eq!(match_row_in_window(&both, 10, "alice", 12), Some(12));
 }
+
+// ---------- extract_paste_fields (003-discord-paste-quick-add) ----------
+
+#[test]
+fn test_extract_paste_fields_real_samples() {
+    // The real badge-request sample gathered while writing spec.md.
+    let badge_sample = "\
+ROBLOX Username: torba_f
+ROBLOX ID: 2452545815
+Current Division & Rank: 1ID, Colonel
+Badge Requested: Army Parachutist Badge
+Proof: [image attachment]";
+    let extracted = extract_paste_fields(badge_sample);
+    assert_eq!(extracted.username.as_deref(), Some("torba_f"));
+    assert_eq!(
+        extracted.award_text.as_deref(),
+        Some("Army Parachutist Badge")
+    );
+
+    // The real ribbon-request sample gathered while writing spec.md, including the clerk's own
+    // "Afganistan" spelling — extraction preserves whatever text follows the label verbatim;
+    // catalog matching (a separate step) is what decides whether it resolves confidently.
+    let ribbon_sample = "\
+ROBLOX Username: Nevazaku_u
+ROBLOX ID: 1881585077
+Current Division & Rank: JFKSWCS, Brigadier General
+Ribbon Requested: Afganistan Campaign x1
+Proof: https://docs.google.com/spreadsheets/d/1Y8jEcLpRb6lDDhe7Axb5Z27dotsb3p-QKMtpvFATEjY/edit?gid=1708955154#gid=1708955154";
+    let extracted = extract_paste_fields(ribbon_sample);
+    assert_eq!(extracted.username.as_deref(), Some("Nevazaku_u"));
+    assert_eq!(
+        extracted.award_text.as_deref(),
+        Some("Afganistan Campaign x1")
+    );
+}
+
+#[test]
+fn test_extract_paste_fields_bare_username_label_and_markdown_artifacts() {
+    // quickstart.md Scenario 6: bare "Username" label variant (FR-002), plus Markdown
+    // bold/italic emphasis and an "@" mention sigil that must not leak into the extracted values.
+    let sample = "**Username**: @torba_f\nBadge Requested: _Army Parachutist Badge_\nProof: [image attachment]";
+    let extracted = extract_paste_fields(sample);
+    assert_eq!(extracted.username.as_deref(), Some("torba_f"));
+    assert_eq!(
+        extracted.award_text.as_deref(),
+        Some("Army Parachutist Badge")
+    );
+}
+
+#[test]
+fn test_extract_paste_fields_missing_username_line() {
+    let sample = "Badge Requested: Army Parachutist Badge\nProof: [image attachment]";
+    let extracted = extract_paste_fields(sample);
+    assert_eq!(extracted.username, None);
+    assert_eq!(
+        extracted.award_text.as_deref(),
+        Some("Army Parachutist Badge")
+    );
+}
+
+#[test]
+fn test_extract_paste_fields_missing_award_line() {
+    let sample = "ROBLOX Username: torba_f\nProof: [image attachment]";
+    let extracted = extract_paste_fields(sample);
+    assert_eq!(extracted.username.as_deref(), Some("torba_f"));
+    assert_eq!(extracted.award_text, None);
+}
+
+#[test]
+fn test_extract_paste_fields_first_of_two_stacked_username_lines_wins() {
+    // Edge Case: two stacked requests / a reply-quote — the first match wins, the system never
+    // silently combines or overwrites with a later line.
+    let sample = "ROBLOX Username: first_user\nBadge Requested: Some Badge\nROBLOX Username: second_user";
+    let extracted = extract_paste_fields(sample);
+    assert_eq!(extracted.username.as_deref(), Some("first_user"));
+}
+
+#[test]
+fn test_extract_paste_fields_completely_unparseable() {
+    let extracted = extract_paste_fields("just some unrelated text\nwith no labeled lines at all");
+    assert_eq!(extracted, ExtractedRequest::default());
+}
+
+// ---------- split_award_suffix (003-discord-paste-quick-add) ----------
+
+#[test]
+fn test_split_award_suffix() {
+    assert_eq!(
+        split_award_suffix("Afghanistan Campaign x1"),
+        ("Afghanistan Campaign".to_string(), "x1".to_string())
+    );
+    assert_eq!(
+        split_award_suffix("Army Parachutist Badge"),
+        ("Army Parachutist Badge".to_string(), String::new())
+    );
+    assert_eq!(
+        split_award_suffix("Something x"),
+        ("Something x".to_string(), String::new()),
+        "a trailing 'x' not followed by digits must not be treated as a suffix"
+    );
+}
+
+// ---------- match_catalog_entries (003-discord-paste-quick-add) ----------
+
+#[test]
+fn test_match_catalog_entries() {
+    let catalog = vec![
+        AwardDef {
+            category: "badges".into(),
+            sheet: "Badges Database".into(),
+            col: "C".into(),
+            base_name: "Army Parachutist Badge".into(),
+        },
+        AwardDef {
+            category: "badges".into(),
+            sheet: "Badges Database".into(),
+            col: "D".into(),
+            base_name: "Army Air Assault Badge".into(),
+        },
+        AwardDef {
+            category: "ribbons".into(),
+            sheet: "Ribbons Database".into(),
+            col: "E".into(),
+            base_name: "Afghanistan Campaign".into(),
+        },
+    ];
+
+    let exact = match_catalog_entries(&catalog, "parachutist");
+    assert_eq!(exact.len(), 1);
+    assert_eq!(exact[0].base_name, "Army Parachutist Badge");
+
+    let none = match_catalog_entries(&catalog, "not a real award");
+    assert!(none.is_empty());
+
+    let many = match_catalog_entries(&catalog, "army");
+    assert_eq!(many.len(), 2);
+}

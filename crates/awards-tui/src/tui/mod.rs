@@ -4,7 +4,7 @@ mod ui;
 use app::{App, WorkerMsg};
 use crossterm::{
     cursor::{SetCursorStyle, Show},
-    event::{self, Event},
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -25,10 +25,15 @@ impl TerminalSession {
     fn new() -> anyhow::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
+        // Bracketed paste lets a multi-line Discord message paste into the TUI as one atomic
+        // `Event::Paste` instead of a burst of individual keystrokes (003-discord-paste-quick-add,
+        // research.md §1). Not every terminal supports it; failing to enable it is a graceful
+        // degradation (the clerk falls back to manual Lookup + Add), not a fatal error.
         if let Err(err) = execute!(
             stdout,
             EnterAlternateScreen,
-            SetCursorStyle::BlinkingBar
+            SetCursorStyle::BlinkingBar,
+            EnableBracketedPaste
         ) {
             let _ = disable_raw_mode();
             return Err(err.into());
@@ -57,6 +62,7 @@ impl TerminalSession {
         let _ = disable_raw_mode();
         let _ = execute!(
             self.terminal.backend_mut(),
+            DisableBracketedPaste,
             LeaveAlternateScreen,
             SetCursorStyle::DefaultUserShape,
             Show
@@ -111,8 +117,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<
             .checked_sub(last_tick.elapsed())
             .unwrap_or_else(|| Duration::from_millis(0));
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                app.handle_key(key);
+            match event::read()? {
+                Event::Key(key) => app.handle_key(key),
+                // A bracketed paste delivers the entire pasted string as one event, with no
+                // synthesized keypresses in between (003-discord-paste-quick-add, research.md
+                // §1) — routed to the open Discord-paste modal, if any; ignored otherwise.
+                Event::Paste(text) => app.handle_paste(text),
+                _ => {}
             }
         }
         if last_tick.elapsed() >= TICK_RATE {

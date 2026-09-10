@@ -1,11 +1,12 @@
 use crate::config::AppConfig;
 use awards_core::{
     awards_excluding_duplicate_rows, check_assist, col_to_index, collect_sheet_audit,
-    find_duplicates_for_user, find_grant_target, finding_username, flatten_audit_findings,
-    flatten_awards_sorted, format_audit_report, get_awards_for_username, normalize_username,
-    owned_award_columns, parse_bare_username, reindex_column_after_delete, row_offset,
-    shift_column_up_in_rows, upsert_award_in_index, AssistVerdict, Award, AwardDef, AuditFinding,
-    AwardsData, CATEGORY_LABELS, GrantPlan,
+    extract_paste_fields, find_duplicates_for_user, find_grant_target, finding_username,
+    flatten_audit_findings, flatten_awards_sorted, format_audit_report, get_awards_for_username,
+    match_catalog_entries, normalize_username, owned_award_columns, parse_bare_username,
+    reindex_column_after_delete, row_offset, shift_column_up_in_rows, split_award_suffix,
+    upsert_award_in_index, AssistVerdict, Award, AwardDef, AuditFinding, AwardsData,
+    CATEGORY_LABELS, GrantPlan,
 };
 use awards_sheets::{
     add_award_to_user, auth_status, award_with_live_row, build_awards_data, project_root,
@@ -23,6 +24,7 @@ use tui_input::Input;
 const ACTIONS: &[Action] = &[
     Action::Lookup,
     Action::Add,
+    Action::PasteAdd,
     Action::Edit,
     Action::Delete,
     Action::Rename,
@@ -68,6 +70,10 @@ pub enum FocusArea {
 pub enum Action {
     Lookup,
     Add,
+    /// Paste a forwarded Discord request and pre-fill the Add flow from it
+    /// (003-discord-paste-quick-add). Unlike `Add`, opening this does not require a username
+    /// already looked up.
+    PasteAdd,
     Edit,
     Delete,
     Rename,
@@ -81,6 +87,7 @@ impl Action {
         match self {
             Self::Lookup => "Lookup",
             Self::Add => "Add",
+            Self::PasteAdd => "Paste",
             Self::Edit => "Edit",
             Self::Delete => "Delete",
             Self::Rename => "Rename",
@@ -138,11 +145,24 @@ pub struct VisibleAward {
 #[derive(Debug)]
 pub enum Modal {
     Add(AddModal),
+    /// Discord-paste entry point (003-discord-paste-quick-add) — resolves into a pre-filled
+    /// `Modal::Add` (confident match or filtered picker) on submit; see
+    /// `contracts/tui-paste-interaction.md`.
+    PasteAdd(PasteAddModal),
     Edit(EditModal),
     Delete(DeleteModal),
     Rename(RenameModal),
     Assist(AssistModal),
     Audit(AuditModal),
+}
+
+/// State for the Discord-paste entry point (003-discord-paste-quick-add). `buffer` accumulates
+/// both bracketed-paste content and typed fallback input; it is never persisted or logged
+/// (FR-010) and is dropped the moment the modal resolves into a `Modal::Add` or is cancelled.
+#[derive(Debug, Default)]
+pub struct PasteAddModal {
+    pub buffer: String,
+    pub error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -548,6 +568,7 @@ impl App {
             KeyCode::BackTab => self.cycle_focus(-1),
             KeyCode::Enter if self.focus == FocusArea::Username => self.action_lookup(),
             KeyCode::Char('a') if self.focus != FocusArea::Username => self.action_add(),
+            KeyCode::Char('p') if self.focus != FocusArea::Username => self.action_paste_add(),
             KeyCode::Char('e') if self.focus != FocusArea::Username => self.action_edit(),
             KeyCode::Char('d') if self.focus != FocusArea::Username => self.action_delete(),
             KeyCode::Char('n') if self.focus != FocusArea::Username => self.action_rename(),
@@ -879,10 +900,23 @@ impl App {
         let mut rename_confirm: Option<String> = None;
         let mut assist_run = false;
         let mut assist_grant = false;
+        let mut paste_submit = false;
         let mut status: Option<String> = None;
 
         if let Some(modal) = self.modal.as_mut() {
             match modal {
+                Modal::PasteAdd(paste) => match key.code {
+                    KeyCode::Enter => {
+                        paste_submit = true;
+                    }
+                    KeyCode::Backspace => {
+                        paste.buffer.pop();
+                    }
+                    KeyCode::Char(ch) => {
+                        paste.buffer.push(ch);
+                    }
+                    _ => {}
+                },
                 Modal::Add(add) => match add.step {
                     AddStep::Pick => match key.code {
                         KeyCode::Up => move_list(&mut add.state, add.filtered.len(), -1),
@@ -1044,6 +1078,97 @@ impl App {
         if assist_grant {
             self.commit_assist_grant();
         }
+        if paste_submit {
+            self.submit_paste_add();
+        }
+    }
+
+    /// Handle a bracketed-paste event (`crossterm::event::Event::Paste`) delivered from the run
+    /// loop while the Discord-paste modal is open (003-discord-paste-quick-add, research.md §1).
+    /// Ignored when that modal isn't open — a paste elsewhere in the app has no meaning here.
+    pub fn handle_paste(&mut self, text: String) {
+        if let Some(Modal::PasteAdd(paste)) = self.modal.as_mut() {
+            paste.buffer.push_str(&text);
+        }
+    }
+
+    /// Resolve the pasted text in an open `Modal::PasteAdd` into either a pre-filled `Modal::Add`
+    /// (a confident single catalog match, or a filtered picker otherwise) or an inline error that
+    /// keeps the paste buffer around for the clerk to correct — see
+    /// `contracts/tui-paste-interaction.md` "Submit behavior".
+    fn submit_paste_add(&mut self) {
+        let Some(Modal::PasteAdd(paste)) = self.modal.as_ref() else {
+            return;
+        };
+        let extracted = extract_paste_fields(&paste.buffer);
+
+        let Some(username) = extracted.username else {
+            if let Some(Modal::PasteAdd(paste)) = self.modal.as_mut() {
+                paste.error = Some(
+                    "Couldn't find a username in that text — check it and try again, or Esc to cancel"
+                        .to_string(),
+                );
+            }
+            return;
+        };
+        if self.data.is_none() {
+            if let Some(Modal::PasteAdd(paste)) = self.modal.as_mut() {
+                paste.error = Some("Still loading awards...".to_string());
+            }
+            return;
+        }
+
+        // Local, in-memory lookup — no network round trip (research.md §7), same path
+        // `action_lookup` already uses.
+        self.apply_user_view(&username, None, None);
+
+        let Some(data) = self.data.as_ref() else {
+            return;
+        };
+        let owned_source: Vec<Award> = self
+            .results
+            .iter()
+            .chain(self.duplicates.iter())
+            .cloned()
+            .collect();
+        let owned = owned_award_columns(&owned_source, &username);
+        let candidates: Vec<AwardDef> = data
+            .catalog
+            .iter()
+            .filter(|def| !owned.contains(&(def.sheet.clone(), def.col.clone())))
+            .cloned()
+            .collect();
+        if candidates.is_empty() {
+            self.modal = None;
+            self.status = "No remaining awards to add for this user".to_string();
+            return;
+        }
+
+        let Some(award_text) = extracted.award_text else {
+            // No award line at all: still land on the picker so what WAS extracted (the
+            // username) carries through, per spec User Story 2.
+            self.modal = Some(Modal::Add(AddModal::new(candidates)));
+            return;
+        };
+
+        let (base_query, suffix) = split_award_suffix(&award_text);
+        let matches = match_catalog_entries(&candidates, &base_query);
+        if matches.len() == 1 {
+            let chosen = matches.into_iter().next().expect("len checked above");
+            let mut add = AddModal::new(candidates);
+            add.chosen = Some(chosen);
+            add.step = AddStep::Suffix;
+            add.suffix = input_with_value(suffix);
+            self.modal = Some(Modal::Add(add));
+            return;
+        }
+
+        // Zero or more than one match: fall back to the searchable picker, pre-filtered with
+        // the extracted text rather than an auto-confirmed guess (spec User Story 2, AC1).
+        let mut add = AddModal::new(candidates);
+        add.filter = input_with_value(award_text);
+        add.reload();
+        self.modal = Some(Modal::Add(add));
     }
 
     /// Key handling while the Audit modal is open: navigation and view-toggle in both
@@ -1255,6 +1380,7 @@ impl App {
         match action {
             Action::Lookup => self.action_lookup(),
             Action::Add => self.action_add(),
+            Action::PasteAdd => self.action_paste_add(),
             Action::Edit => self.action_edit(),
             Action::Delete => self.action_delete(),
             Action::Rename => self.action_rename(),
@@ -1336,6 +1462,15 @@ impl App {
             return;
         }
         self.modal = Some(Modal::Add(AddModal::new(candidates)));
+    }
+
+    /// Open the Discord-paste entry point (003-discord-paste-quick-add). Unlike `action_add`,
+    /// this does not require a username already looked up — that's the entire point.
+    fn action_paste_add(&mut self) {
+        if !self.begin_dialog() {
+            return;
+        }
+        self.modal = Some(Modal::PasteAdd(PasteAddModal::default()));
     }
 
     fn action_edit(&mut self) {
@@ -1758,19 +1893,9 @@ impl AddModal {
     }
 
     fn reload(&mut self) {
-        let query = self.filter.value().trim().to_ascii_lowercase();
-        self.filtered = self
-            .all_candidates
-            .iter()
-            .filter(|def| {
-                query.is_empty()
-                    || def.base_name.to_ascii_lowercase().contains(&query)
-                    || category_label(&def.category)
-                        .to_ascii_lowercase()
-                        .contains(&query)
-            })
-            .cloned()
-            .collect();
+        // Shared with the paste-to-prefill flow's fallback path (research.md §5,
+        // 003-discord-paste-quick-add) so the two call sites can never drift apart.
+        self.filtered = match_catalog_entries(&self.all_candidates, self.filter.value());
         if self.filtered.is_empty() {
             self.state.select(None);
         } else {
@@ -1929,6 +2054,25 @@ mod tests {
         let mut data = AwardsData::default();
         data.index.insert(username.to_string(), awards);
         data
+    }
+
+    fn awards_data_with_catalog(
+        username: &str,
+        awards: Vec<Award>,
+        catalog: Vec<AwardDef>,
+    ) -> AwardsData {
+        let mut data = awards_data_with(username, awards);
+        data.catalog = catalog;
+        data
+    }
+
+    fn award_def(category: &str, base_name: &str, sheet: &str, col: &str) -> AwardDef {
+        AwardDef {
+            category: category.to_string(),
+            sheet: sheet.to_string(),
+            col: col.to_string(),
+            base_name: base_name.to_string(),
+        }
     }
 
     fn assist_modal(username: &str, query: &str, step: AssistStep) -> AssistModal {
@@ -2818,5 +2962,231 @@ mod tests {
         assert_eq!(app.status, "delete failed: row changed on the sheet");
         assert!(app.saved_audit.is_none());
         assert!(app.audit_fix_username.is_none());
+    }
+
+    // ---------- Discord paste quick-add (003-discord-paste-quick-add) ----------
+
+    #[test]
+    fn paste_add_with_a_confident_match_lands_in_the_suffix_step_prefilled() {
+        // The real badge-request sample gathered while writing spec.md.
+        let (mut app, _rx) = test_app();
+        app.data = Some(awards_data_with_catalog(
+            "torba_f",
+            Vec::new(),
+            vec![
+                award_def("badges", "Army Parachutist Badge", "Badges Database", "C"),
+                award_def("badges", "Combat Action Badge", "Badges Database", "D"),
+            ],
+        ));
+        app.modal = Some(Modal::PasteAdd(PasteAddModal::default()));
+        app.handle_paste(
+            "ROBLOX Username: torba_f\n\
+             ROBLOX ID: 2452545815\n\
+             Current Division & Rank: 1ID, Colonel\n\
+             Badge Requested: Army Parachutist Badge\n\
+             Proof: [image attachment]"
+                .to_string(),
+        );
+        app.handle_key(key(KeyCode::Enter));
+
+        match &app.modal {
+            Some(Modal::Add(add)) => {
+                assert!(matches!(add.step, AddStep::Suffix));
+                assert_eq!(
+                    add.chosen.as_ref().map(|def| def.base_name.as_str()),
+                    Some("Army Parachutist Badge")
+                );
+                assert_eq!(add.suffix.value(), "");
+            }
+            other => panic!("expected a pre-filled Add modal, got {other:?}"),
+        }
+        assert_eq!(app.results_username.as_deref(), Some("torba_f"));
+    }
+
+    #[test]
+    fn paste_add_with_a_repeat_count_suffix_prefills_the_suffix_field() {
+        // The real ribbon-request sample gathered while writing spec.md. The catalog entry is
+        // spelled to match the clerk's own "Afganistan" text — extraction and matching don't
+        // second-guess the clerk's spelling; a live catalog spelled differently would instead
+        // fall through to the picker path (see the "no catalog match" test below), which is the
+        // spec-correct behavior for a genuine typo, not a bug.
+        let (mut app, _rx) = test_app();
+        app.data = Some(awards_data_with_catalog(
+            "Nevazaku_u",
+            Vec::new(),
+            vec![award_def(
+                "ribbons",
+                "Afganistan Campaign",
+                "Ribbons Database",
+                "E",
+            )],
+        ));
+        app.modal = Some(Modal::PasteAdd(PasteAddModal::default()));
+        app.handle_paste(
+            "ROBLOX Username: Nevazaku_u\n\
+             ROBLOX ID: 1881585077\n\
+             Current Division & Rank: JFKSWCS, Brigadier General\n\
+             Ribbon Requested: Afganistan Campaign x1\n\
+             Proof: https://docs.google.com/spreadsheets/d/1Y8jEcLpRb6lDDhe7Axb5Z27dotsb3p-QKMtpvFATEjY/edit?gid=1708955154#gid=1708955154"
+                .to_string(),
+        );
+        app.handle_key(key(KeyCode::Enter));
+
+        match &app.modal {
+            Some(Modal::Add(add)) => {
+                assert!(matches!(add.step, AddStep::Suffix));
+                assert_eq!(
+                    add.chosen.as_ref().map(|def| def.base_name.as_str()),
+                    Some("Afganistan Campaign")
+                );
+                assert_eq!(
+                    add.suffix.value(),
+                    "x1",
+                    "FR-011: the count indicator must carry through"
+                );
+            }
+            other => panic!("expected a pre-filled Add modal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn confirming_a_paste_prefilled_add_reaches_the_same_write_dispatch_as_manual_add() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(awards_data_with_catalog(
+            "torba_f",
+            Vec::new(),
+            vec![award_def(
+                "badges",
+                "Army Parachutist Badge",
+                "Badges Database",
+                "C",
+            )],
+        ));
+        app.modal = Some(Modal::PasteAdd(PasteAddModal::default()));
+        app.handle_paste("ROBLOX Username: torba_f\nBadge Requested: Army Parachutist Badge".into());
+        app.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(app.modal, Some(Modal::Add(_))),
+            "expected the paste to resolve into Modal::Add first"
+        );
+
+        // Confirming the Suffix step is identical to what a manually-entered Add already does.
+        app.handle_key(key(KeyCode::Enter));
+        assert!(
+            app.modal.is_none(),
+            "commit_add closes the modal exactly like a manual Add (FR-009)"
+        );
+        assert!(
+            app.busy,
+            "the write dispatch went through the same begin_busy/commit_add path"
+        );
+        assert!(
+            app.status.starts_with("Writing Army Parachutist Badge"),
+            "status: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn paste_add_with_no_catalog_match_opens_the_picker_prefiltered() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(awards_data_with_catalog(
+            "torba_f",
+            Vec::new(),
+            vec![award_def(
+                "badges",
+                "Army Parachutist Badge",
+                "Badges Database",
+                "C",
+            )],
+        ));
+        app.modal = Some(Modal::PasteAdd(PasteAddModal::default()));
+        app.handle_paste("ROBLOX Username: torba_f\nBadge Requested: Not A Real Badge".into());
+        app.handle_key(key(KeyCode::Enter));
+
+        match &app.modal {
+            Some(Modal::Add(add)) => {
+                assert!(matches!(add.step, AddStep::Pick));
+                assert_eq!(add.filter.value(), "Not A Real Badge");
+                assert!(
+                    add.filtered.is_empty(),
+                    "the filter matches nothing in the catalog"
+                );
+            }
+            other => panic!("expected the Pick-step picker, got {other:?}"),
+        }
+        assert_eq!(app.results_username.as_deref(), Some("torba_f"));
+    }
+
+    #[test]
+    fn paste_add_with_multiple_catalog_matches_opens_the_picker_prefiltered() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(awards_data_with_catalog(
+            "torba_f",
+            Vec::new(),
+            vec![
+                award_def("badges", "Army Parachutist Badge", "Badges Database", "C"),
+                award_def("badges", "Army Air Assault Badge", "Badges Database", "D"),
+            ],
+        ));
+        app.modal = Some(Modal::PasteAdd(PasteAddModal::default()));
+        app.handle_paste("ROBLOX Username: torba_f\nBadge Requested: Army".into());
+        app.handle_key(key(KeyCode::Enter));
+
+        match &app.modal {
+            Some(Modal::Add(add)) => {
+                assert!(matches!(add.step, AddStep::Pick));
+                assert_eq!(add.filter.value(), "Army");
+                assert_eq!(
+                    add.filtered.len(),
+                    2,
+                    "both Army-prefixed badges should still be listed for the clerk to choose"
+                );
+            }
+            other => panic!("expected the Pick-step picker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paste_add_with_no_username_line_keeps_the_modal_open_with_an_error() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        app.modal = Some(Modal::PasteAdd(PasteAddModal::default()));
+        app.handle_paste("Badge Requested: Army Parachutist Badge".into());
+        app.handle_key(key(KeyCode::Enter));
+
+        match &app.modal {
+            Some(Modal::PasteAdd(paste)) => {
+                assert!(paste.error.is_some(), "expected an inline error");
+                assert!(
+                    paste.buffer.contains("Army Parachutist Badge"),
+                    "the buffer must be preserved so the clerk can correct and resubmit"
+                );
+            }
+            other => panic!("expected Modal::PasteAdd to stay open, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paste_add_with_completely_unparseable_text_gets_the_same_generic_error() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        app.modal = Some(Modal::PasteAdd(PasteAddModal::default()));
+        app.handle_paste("just some unrelated text with no labeled lines at all".into());
+        app.handle_key(key(KeyCode::Enter));
+
+        match &app.modal {
+            Some(Modal::PasteAdd(paste)) => assert!(paste.error.is_some()),
+            other => panic!("expected Modal::PasteAdd to stay open, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn esc_from_paste_add_closes_it_and_reports_cancelled() {
+        let (mut app, _rx) = test_app();
+        app.modal = Some(Modal::PasteAdd(PasteAddModal::default()));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.modal.is_none());
+        assert_eq!(app.status, "Dialog cancelled");
     }
 }

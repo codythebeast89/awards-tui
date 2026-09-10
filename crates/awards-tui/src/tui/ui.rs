@@ -261,6 +261,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
 
 fn render_modal(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) {
     let modal_area = match app.modal.as_ref() {
+        Some(Modal::PasteAdd(_)) => centered_rect(74, 20, area),
         Some(Modal::Add(add)) if matches!(add.step, AddStep::Pick) => centered_rect(74, 28, area),
         Some(Modal::Add(_)) => centered_rect(70, 10, area),
         Some(Modal::Edit(_)) => centered_rect(70, 11, area),
@@ -282,6 +283,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme)
     };
     frame.render_widget(Clear, modal_area);
     match app.modal.as_mut() {
+        Some(Modal::PasteAdd(paste)) => render_paste_add_modal(frame, paste, modal_area, theme),
         Some(Modal::Add(add)) => render_add_modal(frame, add, modal_area, theme),
         Some(Modal::Edit(edit)) => render_edit_modal(frame, edit, modal_area, theme),
         Some(Modal::Delete(delete)) => render_delete_modal(frame, delete, modal_area, theme),
@@ -290,6 +292,71 @@ fn render_modal(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme)
         Some(Modal::Audit(audit)) => render_audit_modal(frame, audit, modal_area, theme),
         None => {}
     }
+}
+
+/// Discord-paste entry point (003-discord-paste-quick-add): a free-form multi-line buffer (not
+/// the single-line `tui-input` widget other modals use — the pasted content itself may be
+/// bracketed-paste-delivered multi-line text) plus an inline error slot for a failed submit.
+fn render_paste_add_modal(
+    frame: &mut Frame<'_>,
+    paste: &crate::tui::app::PasteAddModal,
+    area: Rect,
+    theme: &Theme,
+) {
+    let block = Block::default()
+        .title(" Paste Discord Request ")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(theme.text).bg(theme.panel_alt))
+        .border_style(theme.purple);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(3),
+            Constraint::Length(2),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let (body_text, body_style) = if paste.buffer.is_empty() {
+        (
+            "Paste the Discord message, then press Enter.".to_string(),
+            Style::default().fg(theme.muted).bg(theme.input_bg),
+        )
+    } else {
+        (
+            paste.buffer.clone(),
+            Style::default().fg(theme.text).bg(theme.input_bg),
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(body_text)
+            .style(body_style)
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(theme.purple),
+            ),
+        chunks[0],
+    );
+
+    if let Some(error) = &paste.error {
+        frame.render_widget(
+            Paragraph::new(error.as_str())
+                .style(Style::default().fg(theme.dup).bg(theme.panel_alt))
+                .wrap(Wrap { trim: true }),
+            chunks[1],
+        );
+    }
+
+    frame.render_widget(
+        Paragraph::new("Enter submit · Esc cancel")
+            .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
+        chunks[2],
+    );
 }
 
 fn render_add_modal(

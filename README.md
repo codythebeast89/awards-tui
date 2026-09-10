@@ -78,6 +78,7 @@ Purple dark layout: username bar, fixed **Actions** pane, tabbed **Awards** list
 |-----|--------|
 | Enter (in username) | Look up username |
 | a | Add award for current user |
+| p / Paste | Paste a forwarded Discord request (badge/ribbon) and pre-fill Add from it |
 | e | Edit selected award cell |
 | d | Delete selected award (type `delete` to confirm) |
 | n | Rename current user across all sheet cells (type `rename` to confirm) |
@@ -86,6 +87,16 @@ Purple dark layout: username bar, fixed **Actions** pane, tabbed **Awards** list
 | Tab | Cycle focus |
 | Ctrl+Q | Quit |
 | Esc | Cancel modal / close audit browser |
+
+Actions → **Paste** opens a buffer for a Logistics Clerk to paste the raw text of a badge/ribbon
+request manually forwarded from Discord (e.g. `ROBLOX Username: ...` / `Badge Requested: ...`).
+Press Enter to submit: a recognized username and a confidently-matched award land you straight in
+the existing Add flow's award-detail step, pre-filled (including a trailing repeat/count indicator
+like `x1`); an unmatched or ambiguous award instead opens the normal searchable award picker
+pre-filled with that text; a missing or unrecognized username keeps the paste buffer open with an
+inline message so you can correct and resubmit. This never fetches, opens, or otherwise processes
+whatever the pasted text names as proof — you still check that yourself, exactly as before — and
+every write still goes through the same OAuth-gated path the manual Add flow already uses.
 
 Actions → **Audit** opens a selectable findings list (also writes the plain-text report to
 `audits/audit-*.txt`, unchanged, for record-keeping). Findings are grouped by the username
