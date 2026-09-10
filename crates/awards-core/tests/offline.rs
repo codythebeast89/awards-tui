@@ -525,6 +525,34 @@ fn test_extract_paste_fields_completely_unparseable() {
     assert_eq!(extracted, ExtractedRequest::default());
 }
 
+#[test]
+fn test_extract_paste_fields_cr_only_line_endings() {
+    // Regression: some terminals deliver a bracketed paste with `\r`-only line endings, which
+    // `str::lines()` does not treat as a line break — it silently ran every field into the
+    // next (observed live: "ROBLOX Username: torba_fROBLOX ID: 2452545815..."), so no username
+    // could ever be extracted from a real paste on that terminal.
+    let badge_sample = "ROBLOX Username: torba_f\rROBLOX ID: 2452545815\rCurrent Division & Rank: 1ID, Colonel\rBadge Requested: Army Parachutist Badge\rProof: [image attachment]";
+    let extracted = extract_paste_fields(badge_sample);
+    assert_eq!(extracted.username.as_deref(), Some("torba_f"));
+    assert_eq!(
+        extracted.award_text.as_deref(),
+        Some("Army Parachutist Badge")
+    );
+}
+
+#[test]
+fn test_extract_paste_fields_mixed_crlf_and_lone_cr() {
+    // A paste can plausibly mix \r\n (the common case) with a stray lone \r elsewhere; both
+    // must still be treated as line breaks.
+    let sample = "ROBLOX Username: torba_f\r\nBadge Requested: Army Parachutist Badge\rProof: [image attachment]";
+    let extracted = extract_paste_fields(sample);
+    assert_eq!(extracted.username.as_deref(), Some("torba_f"));
+    assert_eq!(
+        extracted.award_text.as_deref(),
+        Some("Army Parachutist Badge")
+    );
+}
+
 // ---------- split_award_suffix (003-discord-paste-quick-add) ----------
 
 #[test]

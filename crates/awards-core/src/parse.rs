@@ -230,13 +230,19 @@ fn strip_paste_artifacts(value: &str) -> String {
 /// suffix-splitting (`split_award_suffix`). Never extracts anything from a `Proof:` line, and
 /// neither this function nor the raw pasted text it reads is ever persisted or logged (FR-008,
 /// FR-010).
+///
+/// Splits on `\n`, `\r\n`, *and* a lone `\r` — some terminals deliver a bracketed paste with
+/// `\r`-only line endings, which `str::lines()` does not treat as a line break at all (it only
+/// recognizes `\n`/`\r\n`), silently running every field into the next. A bare `str::lines()`
+/// call here would then hand the whole block to `split_labeled_line` as a single line, so the
+/// first ':' would swallow every field after the username's into one unparseable value.
 pub fn extract_paste_fields(raw: &str) -> ExtractedRequest {
     let mut username: Option<String> = None;
     let mut username_line_seen = false;
     let mut award_text: Option<String> = None;
     let mut award_line_seen = false;
 
-    for line in raw.lines() {
+    for line in raw.split(['\n', '\r']) {
         if username_line_seen && award_line_seen {
             break;
         }
