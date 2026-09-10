@@ -1,0 +1,20 @@
+[package]
+name = "awards-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native desktop GUI (Lookup & Add) for the FORSCOM Decorations Database"
+repository.workspace = true
+
+[[bin]]
+name = "awards-gui"
+path = "src/main.rs"
+
+[dependencies]
+awards-core = { workspace = true }
+awards-sheets = { workspace = true }
+anyhow = { workspace = true }
+# Not a workspace dependency: awards-gui is the only crate that needs a GUI framework
+# (Constitution I — a dependency belongs only to the crate that uses it). Pinned to a specific
+# minor version, matching the workspace's other pinned externals.
+eframe = { version = "=0.36.2", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }

@@ -4,6 +4,7 @@ members = [
     "crates/awards-core",
     "crates/awards-sheets",
     "crates/awards-tui",
+    "crates/awards-gui",
 ]
 default-members = ["crates/awards-tui"]
 
