@@ -19,7 +19,7 @@ use std::fs;
 use std::sync::mpsc::Sender;
 use std::thread;
 use tui_input::backend::crossterm::EventHandler;
-use tui_input::Input;
+use tui_input::{Input, InputRequest};
 
 const ACTIONS: &[Action] = &[
     Action::Lookup,
@@ -1084,11 +1084,58 @@ impl App {
     }
 
     /// Handle a bracketed-paste event (`crossterm::event::Event::Paste`) delivered from the run
-    /// loop while the Discord-paste modal is open (003-discord-paste-quick-add, research.md §1).
-    /// Ignored when that modal isn't open — a paste elsewhere in the app has no meaning here.
+    /// loop. Originally this only fed the Discord-paste modal's buffer
+    /// (003-discord-paste-quick-add, research.md §1); it now routes pasted text into
+    /// whichever text field is actually active, mirroring the exact modal/step dispatch
+    /// `handle_modal_key` uses for individual keystrokes, so Ctrl+V works in the main
+    /// Lookup field and in every modal's text input, not just Discord-paste.
+    ///
+    /// This inserts character-by-character via `insert_pasted_text` rather than
+    /// `Input::handle_event(&Event::Paste(..))`: tui-input 0.15's crossterm backend
+    /// (`tui-input-0.15.4/src/backend/crossterm.rs::to_input_request`) only recognizes
+    /// `Event::Key`, so handing it a `Paste` event is a silent no-op.
     pub fn handle_paste(&mut self, text: String) {
-        if let Some(Modal::PasteAdd(paste)) = self.modal.as_mut() {
-            paste.buffer.push_str(&text);
+        if let Some(modal) = self.modal.as_mut() {
+            match modal {
+                Modal::PasteAdd(paste) => paste.buffer.push_str(&text),
+                Modal::Add(add) => match add.step {
+                    AddStep::Pick => {
+                        insert_pasted_text(&mut add.filter, &text);
+                        add.reload();
+                    }
+                    AddStep::Suffix => {
+                        insert_pasted_text(&mut add.suffix, &text);
+                    }
+                },
+                Modal::Edit(edit) => {
+                    insert_pasted_text(&mut edit.input, &text);
+                }
+                Modal::Delete(delete) => {
+                    insert_pasted_text(&mut delete.input, &text);
+                }
+                Modal::Rename(rename) => match rename.step {
+                    RenameStep::Name => {
+                        insert_pasted_text(&mut rename.input, &text);
+                    }
+                    RenameStep::Confirm => {
+                        insert_pasted_text(&mut rename.confirm, &text);
+                    }
+                },
+                Modal::Assist(assist) => {
+                    if matches!(assist.step, AssistStep::Query) {
+                        insert_pasted_text(&mut assist.input, &text);
+                    }
+                }
+                // The Audit browser has no free-text field to paste into (its one
+                // text-entry-shaped state, `ChooseUsername`, just picks between two
+                // existing candidates), so a paste there is dropped, same as a keystroke.
+                Modal::Audit(_) => {}
+            }
+        } else if self.focus == FocusArea::Username {
+            // No modal open: route to the main Lookup field, but only when it's actually
+            // focused - a paste while browsing Actions/Awards/Detail has nowhere to land,
+            // same as a stray keystroke there.
+            insert_pasted_text(&mut self.username, &text);
         }
     }
 
@@ -1919,6 +1966,18 @@ pub fn category_label(category: &str) -> &str {
 
 fn input_with_value(value: String) -> Input {
     Input::default().with_value(value)
+}
+
+/// Insert pasted text into a `tui-input::Input`, one character at a time via
+/// `InputRequest::InsertChar`. tui-input 0.15's crossterm backend has no bracketed-paste
+/// support at all - `to_input_request` only matches `Event::Key` - so `Input::handle_event`
+/// silently drops an `Event::Paste`; this is the workaround `handle_paste` uses instead.
+/// Newlines are stripped: every field this feeds is single-line, and a raw `\n`/`\r`
+/// spliced into one would corrupt its rendering rather than mean anything.
+fn insert_pasted_text(input: &mut Input, text: &str) {
+    for ch in text.chars().filter(|c| *c != '\n' && *c != '\r') {
+        input.handle(InputRequest::InsertChar(ch));
+    }
 }
 
 fn move_list(state: &mut ListState, len: usize, delta: isize) {
@@ -3188,5 +3247,192 @@ mod tests {
         app.handle_key(key(KeyCode::Esc));
         assert!(app.modal.is_none());
         assert_eq!(app.status, "Dialog cancelled");
+    }
+
+    // ---------- handle_paste: routes Ctrl+V into whichever text field is active ----------
+    //
+    // Regression coverage for the bug where `handle_paste` only ever fed the
+    // Discord-paste modal's buffer, silently dropping a paste everywhere else -
+    // including the main Lookup field, which has no modal open at all.
+
+    #[test]
+    fn paste_with_no_modal_and_username_focused_lands_in_the_lookup_field() {
+        let (mut app, _rx) = test_app();
+        assert_eq!(app.focus, FocusArea::Username);
+        app.handle_paste("grimreaper42".into());
+        assert_eq!(app.username.value(), "grimreaper42");
+    }
+
+    #[test]
+    fn paste_with_no_modal_and_a_different_pane_focused_is_dropped() {
+        let (mut app, _rx) = test_app();
+        app.focus = FocusArea::Awards;
+        app.handle_paste("grimreaper42".into());
+        assert_eq!(
+            app.username.value(),
+            "",
+            "a paste has nowhere to land while Awards/Actions/Detail is focused, same as a stray keystroke"
+        );
+    }
+
+    #[test]
+    fn paste_into_edit_modal_appends_to_its_input() {
+        let (mut app, _rx) = test_app();
+        let a = award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice");
+        app.modal = Some(Modal::Edit(EditModal {
+            award: a,
+            input: input_with_value("alice".into()),
+        }));
+        app.handle_paste(" x2".into());
+        match &app.modal {
+            Some(Modal::Edit(edit)) => assert_eq!(edit.input.value(), "alice x2"),
+            other => panic!("expected Edit modal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paste_into_delete_modal_appends_to_its_confirmation_input() {
+        let (mut app, _rx) = test_app();
+        let a = award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice");
+        app.modal = Some(Modal::Delete(DeleteModal {
+            award: a,
+            input: input_with_value("del".into()),
+            viewed_username: "alice".into(),
+        }));
+        app.handle_paste("ete".into());
+        match &app.modal {
+            Some(Modal::Delete(delete)) => assert_eq!(delete.input.value(), "delete"),
+            other => panic!("expected Delete modal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paste_into_add_modal_pick_step_updates_filter_and_refilters_candidates() {
+        let (mut app, _rx) = test_app();
+        let def = award_def("badges", "Combat Action Badge", "Badges Database", "C");
+        app.modal = Some(Modal::Add(AddModal::new(vec![def.clone()])));
+        app.handle_paste("Combat".into());
+        match &app.modal {
+            Some(Modal::Add(add)) => {
+                assert!(matches!(add.step, AddStep::Pick));
+                assert_eq!(add.filter.value(), "Combat");
+                assert_eq!(
+                    add.filtered,
+                    vec![def],
+                    "pasting into the filter must refilter the candidate list, same as typing"
+                );
+            }
+            other => panic!("expected Add modal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paste_into_add_modal_suffix_step_appends_to_suffix_field() {
+        let (mut app, _rx) = test_app();
+        let def = award_def("badges", "Combat Action Badge", "Badges Database", "C");
+        let mut add = AddModal::new(vec![def.clone()]);
+        add.step = AddStep::Suffix;
+        add.chosen = Some(def);
+        app.modal = Some(Modal::Add(add));
+        app.handle_paste("x2".into());
+        match &app.modal {
+            Some(Modal::Add(add)) => assert_eq!(add.suffix.value(), "x2"),
+            other => panic!("expected Add modal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paste_into_rename_modal_name_step_appends_to_input() {
+        let (mut app, _rx) = test_app();
+        app.modal = Some(Modal::Rename(RenameModal {
+            from: "alice".into(),
+            cell_count: 1,
+            existing_new: 0,
+            input: input_with_value("Bob".into()),
+            confirm: Input::default(),
+            step: RenameStep::Name,
+        }));
+        app.handle_paste("by".into());
+        match &app.modal {
+            Some(Modal::Rename(rename)) => assert_eq!(rename.input.value(), "Bobby"),
+            other => panic!("expected Rename modal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paste_into_rename_modal_confirm_step_appends_to_confirm_field() {
+        let (mut app, _rx) = test_app();
+        app.data = Some(AwardsData::default());
+        app.modal = Some(Modal::Rename(RenameModal {
+            from: "alice".into(),
+            cell_count: 1,
+            existing_new: 0,
+            input: input_with_value("bobby".into()),
+            confirm: input_with_value("ren".into()),
+            step: RenameStep::Confirm,
+        }));
+        app.handle_paste("ame".into());
+        match &app.modal {
+            Some(Modal::Rename(rename)) => assert_eq!(rename.confirm.value(), "rename"),
+            other => panic!("expected Rename modal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paste_into_assist_modal_query_step_appends_to_input() {
+        let (mut app, _rx) = test_app();
+        app.modal = Some(Modal::Assist(assist_modal("alice", "MC", AssistStep::Query)));
+        app.handle_paste("AB".into());
+        match &app.modal {
+            Some(Modal::Assist(assist)) => assert_eq!(assist.input.value(), "MCAB"),
+            other => panic!("expected Assist modal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paste_into_assist_modal_result_step_is_a_no_op() {
+        let (mut app, _rx) = test_app();
+        app.modal = Some(Modal::Assist(assist_modal("alice", "MCAB", AssistStep::Result)));
+        app.handle_paste("ignored".into());
+        match &app.modal {
+            Some(Modal::Assist(assist)) => {
+                assert!(matches!(assist.step, AssistStep::Result));
+                assert_eq!(
+                    assist.input.value(),
+                    "MCAB",
+                    "the Result step has no text field to paste into"
+                );
+            }
+            other => panic!("expected Assist modal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paste_while_audit_modal_open_is_dropped() {
+        let (mut app, _rx) = test_app();
+        app.modal = Some(Modal::Audit(AuditModal::new(
+            "audits/audit-x.txt".into(),
+            "line",
+            Vec::new(),
+        )));
+        app.handle_paste("ignored".into());
+        assert!(
+            matches!(app.modal, Some(Modal::Audit(_))),
+            "the Audit browser has no free-text field; a paste there must be a no-op, not a panic"
+        );
+    }
+
+    #[test]
+    fn paste_into_paste_add_modal_still_appends_to_its_raw_buffer() {
+        // Regression guard: the original, narrower behavior must survive unchanged.
+        let (mut app, _rx) = test_app();
+        app.modal = Some(Modal::PasteAdd(PasteAddModal::default()));
+        app.handle_paste("Badge Requested: Combat Action Badge".into());
+        match &app.modal {
+            Some(Modal::PasteAdd(paste)) => {
+                assert_eq!(paste.buffer, "Badge Requested: Combat Action Badge")
+            }
+            other => panic!("expected Modal::PasteAdd, got {other:?}"),
+        }
     }
 }
