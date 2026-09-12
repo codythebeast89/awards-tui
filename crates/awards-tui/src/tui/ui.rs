@@ -1,8 +1,8 @@
 use crate::{
     config::Theme,
     tui::app::{
-        category_label, describe_finding, AddStep, App, AssistStep, AuditModal, AuditRow,
-        AuditView, AwardTab, FocusArea, Modal, RenameStep, VisibleAward,
+        category_label, describe_finding, Action, AddStep, App, AssistStep, AuditModal, AuditRow,
+        AuditView, AwardTab, FocusArea, HelpModal, Modal, RenameStep, VisibleAward, HELP_LINES,
     },
 };
 use awards_core::{normalize_username, AwardDef};
@@ -117,7 +117,19 @@ fn render_actions(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Them
     let items: Vec<ListItem<'_>> = app
         .actions()
         .iter()
-        .map(|action| ListItem::new(action.label()).style(Style::default().fg(theme.text)))
+        .map(|action| {
+            // Critique follow-up: Delete and Rename already get a red border and a typed-confirm
+            // gate once opened (this TUI's own destructive-action grammar), but sat visually
+            // identical to every safe action in this list until then — the safety signal arrived
+            // one step too late for a quick scan. A text tag plus color, not color alone, matches
+            // the same non-color-anchor fix already applied to duplicate-award rows.
+            let destructive = matches!(action, Action::Delete | Action::Rename);
+            if destructive {
+                ListItem::new(format!("! {}", action.label())).style(Style::default().fg(theme.dup))
+            } else {
+                ListItem::new(action.label()).style(Style::default().fg(theme.text))
+            }
+        })
         .collect();
     let list = List::new(items)
         .block(panel_block(" Actions ", border, theme))
@@ -164,8 +176,18 @@ fn render_awards(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme
     frame.render_widget(tabs, chunks[0]);
 
     let items = if app.visible.is_empty() {
+        // Critique follow-up: before this, a first-time launch (never looked anyone up) and a
+        // genuine zero-result lookup rendered the identical line — a first-timer read "No awards
+        // in this view" as broken or "not found," not "you haven't searched yet." `App::new()`
+        // leaves `results_username` at `None` until `apply_user_view` runs it once and never
+        // resets it back, matching the GUI's own `looked_up: Option<LookedUpUser>` distinction.
+        let message = if app.results_username.is_none() {
+            "Type a username above and press Enter to look someone up"
+        } else {
+            "No awards in this view"
+        };
         vec![ListItem::new(Line::from(Span::styled(
-            "No awards in this view",
+            message,
             Style::default().fg(theme.muted),
         )))]
     } else {
@@ -250,9 +272,11 @@ fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme) {
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    // Critique follow-up: `p` (Paste Discord Request — PRODUCT.md's own headline capability,
+    // action_paste_add in app.rs) was the one bound global action missing from this line.
     frame.render_widget(
         Paragraph::new(
-            "Ctrl+Q quit · Tab focus · Enter/e edit · d delete · a add · n rename · c assist · Audit: Enter fix · F5 · [ ] tabs",
+            "Ctrl+Q quit · Tab focus · Enter/e edit · d delete · a add · p paste · n rename · c assist · Audit: Enter fix · F5 · [ ] tabs",
         )
         .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
         area,
@@ -279,6 +303,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme)
             AuditView::List => centered_rect(94, 28, area),
             AuditView::ChooseUsername { .. } => centered_rect(60, 9, area),
         },
+        Some(Modal::Help(_)) => centered_rect(84, 28, area),
         None => return,
     };
     frame.render_widget(Clear, modal_area);
@@ -290,8 +315,67 @@ fn render_modal(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme)
         Some(Modal::Rename(rename)) => render_rename_modal(frame, rename, modal_area, theme),
         Some(Modal::Assist(assist)) => render_assist_modal(frame, assist, modal_area, theme),
         Some(Modal::Audit(audit)) => render_audit_modal(frame, audit, modal_area, theme),
+        Some(Modal::Help(help)) => render_help_modal(frame, help, modal_area, theme),
         None => {}
     }
+}
+
+/// Critique follow-up (P3): every keybinding in the app, in one place — previously each
+/// secondary binding (`j`/`k`, `[`/`]`, per-modal shortcuts) was only discoverable inside the one
+/// screen that used it. Re-critique follow-up: `HELP_LINES` (~40 lines, `app.rs`) outgrows a
+/// fixed box on realistic terminal heights, so this now scrolls — same idiom as
+/// `render_audit_modal`'s Report view — instead of silently clipping the bottom of its own
+/// content (which, ironically, was exactly the `PageUp`/`Home`/`End` bindings themselves).
+fn render_help_modal(frame: &mut Frame<'_>, help: &HelpModal, area: Rect, theme: &Theme) {
+    let block = Block::default()
+        .title(" Keybindings ")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(theme.text).bg(theme.panel_alt))
+        .border_style(theme.purple);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(inner);
+
+    let lines: Vec<Line<'_>> = HELP_LINES
+        .iter()
+        .map(|&(key, desc)| {
+            if key.is_empty() {
+                Line::from("")
+            } else if desc.is_empty() {
+                Line::from(Span::styled(
+                    key,
+                    Style::default().fg(theme.purple).add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(vec![
+                    Span::styled(format!("{key:<24}"), Style::default().fg(theme.text)),
+                    Span::styled(desc, Style::default().fg(theme.muted)),
+                ])
+            }
+        })
+        .collect();
+    // Clamp for display only — `help.scroll` itself is unclamped-above (Home/End/PageUp/PageDown
+    // in `app.rs` don't know this render's visible height), matching how `AuditModal`'s Report
+    // view leaves clamping to its own scroll arithmetic (`saturating_sub`) instead.
+    let max_scroll = (lines.len() as u16).saturating_sub(chunks[0].height);
+    let scroll = help.scroll.min(max_scroll);
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(theme.panel_alt))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        chunks[0],
+    );
+    frame.render_widget(
+        Paragraph::new("↑/↓ j/k scroll · PgUp/PgDn · Home/End · Esc close")
+            .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
+        chunks[1],
+    );
 }
 
 /// Discord-paste entry point (003-discord-paste-quick-add): a free-form multi-line buffer (not
@@ -896,7 +980,10 @@ fn render_audit_choose_username(
     theme: &Theme,
 ) {
     let block = Block::default()
-        .title(" Similar usernames — which is the typo? ")
+        // Critique follow-up: this was the one dialog title in sentence case rather than Title
+        // Case (DESIGN.md's Panel/Dialog Title Casing Rule) — every other modal/dialog title
+        // (" Rename Username ", " Delete Award ", etc.) already followed it.
+        .title(" Similar Usernames — Which Is The Typo? ")
         .borders(Borders::ALL)
         .style(Style::default().fg(theme.text).bg(theme.panel_alt))
         .border_style(theme.purple);
@@ -935,10 +1022,16 @@ fn award_item(row: &VisibleAward, theme: &Theme) -> ListItem<'static> {
     } else {
         Style::default().fg(theme.text)
     };
-    ListItem::new(Line::from(Span::styled(
-        format!("{}{loc}", row.award.name),
-        style,
-    )))
+    // Critique follow-up: color + bold alone gave a clerk on an adjusted color scheme (or one
+    // just scanning fast) no non-color anchor for exactly the finding that matters most — a plain
+    // text tag, not a symbol/emoji, matches this TUI's existing text-first voice (no icons
+    // anywhere else in it) and avoids any terminal-width surprise a wide glyph could introduce.
+    let name = if row.warning {
+        format!("dup · {}{loc}", row.award.name)
+    } else {
+        format!("{}{loc}", row.award.name)
+    };
+    ListItem::new(Line::from(Span::styled(name, style)))
 }
 
 fn candidate_item(def: &AwardDef, theme: &Theme) -> ListItem<'static> {

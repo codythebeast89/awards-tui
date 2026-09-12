@@ -119,6 +119,45 @@ pub fn auth_status() -> &'static str {
     }
 }
 
+/// Best-effort human-readable identity for the currently signed-in account, for display only —
+/// reuses the same `account`-then-`client_id` fallback `login()` already computes for its own
+/// success message. `None` when signed out or when nothing usable is on disk.
+pub fn account_label() -> Option<String> {
+    if let Some(sa) = service_account_path() {
+        let text = std::fs::read_to_string(&sa).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+        return v
+            .get("client_email")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
+    }
+    let tok = load_authorized_user(&token_path()).ok()?;
+    if !tok.usable() {
+        return None;
+    }
+    Some(
+        tok.account
+            .filter(|s| !s.is_empty())
+            .unwrap_or(tok.client_id),
+    )
+}
+
+/// `false` under a service account: `service_account.json` is a shared, standing credential file,
+/// not a per-session login, so there is no session for a "Sign Out" control to end.
+pub fn can_sign_out() -> bool {
+    service_account_path().is_none()
+}
+
+/// Ends the current OAuth session by deleting the cached token, so the next write re-triggers
+/// interactive sign-in. A no-op under a service account (see `can_sign_out`) or when already
+/// signed out.
+pub fn logout() {
+    if !can_sign_out() {
+        return;
+    }
+    let _ = std::fs::remove_file(token_path());
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct AuthorizedUser {
     token: String,

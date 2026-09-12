@@ -4,7 +4,7 @@
 //! are called from `app.rs`, never from here. Not directly unit-tested (plan.md Testing section)
 //! since this environment cannot open a display; `app.rs`'s tests cover the state this renders.
 
-use crate::app::{AuthState, GuiApp};
+use crate::app::{AuthState, GuiApp, StatusKind};
 use crate::theme;
 use awards_core::{Award, CATEGORY_LABELS};
 use eframe::egui;
@@ -19,11 +19,35 @@ const PANEL_MARGIN: egui::Margin = egui::Margin {
     bottom: 12,
 };
 
+/// A dismissive/secondary action (Cancel, etc.) — critique follow-up: every enabled button used
+/// to share the same accent fill as the one action per screen that actually commits a write
+/// (Confirm/Save), making the two indistinguishable except by reading the label. An
+/// outline/ghost treatment (background fill, a `gui-border` stroke, ordinary text color) reserves
+/// the accent for the primary action.
+fn secondary_button(text: &str) -> egui::Button<'static> {
+    egui::Button::new(egui::RichText::new(text.to_string()).color(theme::TEXT))
+        .fill(theme::BG)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+}
+
 /// Renders the whole window (contract: "single window, no modal dialogs" — the award picker and
 /// edit flow are inline panels, not separate windows). `ui` is the root `Ui` eframe hands to
 /// `App::ui` for this pass — top-level panels attach to it directly (egui 0.36's unified `Panel`
 /// API), and the central panel must be added last (egui's own panel-ordering rule).
 pub fn render(app: &mut GuiApp, ui: &mut egui::Ui) {
+    // 007-gui-edit polish (critique follow-up): a windowed app's only equivalent of the TUI's
+    // Esc-cancel is a real key binding, not just an outcome the doc comments described but
+    // nothing wired up — dismiss whichever single write flow is open (Constitution III: only one
+    // is ever open at a time), edit taking priority since it's the one opened over an existing
+    // picker (`open_edit` closes `add_picker`, never the reverse).
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if app.edit.is_some() {
+            app.cancel_edit();
+        } else if app.add_picker.is_some() {
+            app.cancel_add();
+        }
+    }
+
     egui::Panel::top("lookup_bar").show(ui, |ui| {
         egui::Frame::new()
             .inner_margin(PANEL_MARGIN)
@@ -36,7 +60,14 @@ pub fn render(app: &mut GuiApp, ui: &mut egui::Ui) {
         egui::Frame::new()
             .inner_margin(PANEL_MARGIN)
             .show(ui, |ui| {
-                ui.label(egui::RichText::new(app.status.clone()).color(theme::TEXT_MUTED));
+                // Critique follow-up: a refused write and a completed one used to render as the
+                // same muted gray; StatusKind now carries which one this is.
+                let color = match app.status_kind {
+                    StatusKind::Info => theme::TEXT_MUTED,
+                    StatusKind::Success => theme::ACCENT,
+                    StatusKind::Error => theme::ERROR,
+                };
+                ui.label(egui::RichText::new(app.status.clone()).color(color));
             });
     });
 
@@ -87,7 +118,24 @@ fn render_lookup_bar(app: &mut GuiApp, ui: &mut egui::Ui) {
 
 fn render_sign_in(app: &mut GuiApp, ui: &mut egui::Ui) {
     match app.auth {
-        AuthState::SignedIn => {}
+        // Critique follow-up: previously rendered nothing at all once signed in — a clerk had no
+        // way to see who a write would be attributed to, or to end the session. `can_sign_out` is
+        // false under a service account (a shared standing credential, not a per-session login).
+        AuthState::SignedIn => {
+            ui.horizontal(|ui| {
+                match &app.account_label {
+                    Some(label) => {
+                        ui.label(egui::RichText::new(format!("Signed in as {label}")).color(theme::TEXT_MUTED));
+                    }
+                    None => {
+                        ui.label(egui::RichText::new("Signed in").color(theme::TEXT_MUTED));
+                    }
+                }
+                if app.can_sign_out && ui.button("Sign Out").clicked() {
+                    app.sign_out();
+                }
+            });
+        }
         AuthState::SigningIn => {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -215,7 +263,7 @@ fn render_add_picker(app: &mut GuiApp, ui: &mut egui::Ui) {
         {
             app.confirm_add();
         }
-        if ui.button("Cancel").clicked() {
+        if ui.add(secondary_button("Cancel")).clicked() {
             app.cancel_add();
         }
         if app.auth != AuthState::SignedIn {
@@ -256,7 +304,7 @@ fn render_edit(app: &mut GuiApp, ui: &mut egui::Ui) {
         let save_clicked = ui
             .add_enabled(app.can_confirm_edit(), egui::Button::new("Save"))
             .clicked();
-        if ui.button("Cancel").clicked() {
+        if ui.add(secondary_button("Cancel")).clicked() {
             app.cancel_edit();
         }
         if app.auth != AuthState::SignedIn {

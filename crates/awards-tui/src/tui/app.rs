@@ -154,7 +154,71 @@ pub enum Modal {
     Rename(RenameModal),
     Assist(AssistModal),
     Audit(AuditModal),
+    /// Critique follow-up: a single reference screen for every keybinding in the app, since
+    /// secondary bindings (`j`/`k`, `[`/`]`, per-modal shortcuts) were each only discoverable by
+    /// opening the one screen that used them. Scrollable (re-critique follow-up: the content
+    /// outgrows a fixed box on realistic terminal heights) — same `↑/↓ j/k`/PageUp/PageDown/
+    /// Home/End idiom as `AuditModal`'s own Report view.
+    Help(HelpModal),
 }
+
+#[derive(Debug, Default)]
+pub struct HelpModal {
+    pub scroll: u16,
+}
+
+/// Plain content for the `?` keybinding reference screen — kept here, not in `ui.rs`, so
+/// `HelpModal`'s `End` key can clamp against the real line count without `app.rs` depending on
+/// `ui.rs` (this module's own doc comment forbids that direction). `ui.rs` applies theme/style; a
+/// `("", "")` pair is a blank separator, a `(header, "")` pair is a section header.
+pub const HELP_LINES: &[(&str, &str)] = &[
+    ("Global", ""),
+    ("  Tab / Shift+Tab", "cycle focus"),
+    ("  F5 / Ctrl+R", "refresh"),
+    ("  Ctrl+Q", "quit"),
+    (
+        "  a p e d n c ?",
+        "add · paste · edit · delete · rename · assist · this help",
+    ),
+    ("", ""),
+    ("Username field", ""),
+    ("  Enter", "look up"),
+    ("", ""),
+    ("Actions list", ""),
+    ("  ↑ / ↓", "move selection"),
+    ("  Enter", "activate selected action"),
+    ("", ""),
+    ("Awards list", ""),
+    ("  ↑ / ↓", "move selection"),
+    ("  [ / ]", "previous / next tab"),
+    ("  1-5", "jump to tab (All/Badges/Ribbons/Foreign/Dup)"),
+    ("  Enter", "edit selected award"),
+    ("", ""),
+    ("Detail pane", ""),
+    ("  ↑ / ↓", "move selection"),
+    ("  e / Enter", "edit"),
+    ("  d", "delete"),
+    ("", ""),
+    ("Any dialog", ""),
+    ("  Esc", "cancel / close"),
+    ("", ""),
+    ("Assist result / Audit report", ""),
+    ("  ↑ / ↓ / j / k", "scroll"),
+    ("  Enter", "grant (Assist, when eligible)"),
+    ("", ""),
+    ("Audit browser", ""),
+    ("  ↑ / ↓ / j / k", "move"),
+    ("  PageUp / PageDown", "jump 5"),
+    ("  Home / End", "jump to start / end"),
+    ("  Tab", "toggle List / Report view"),
+    ("  Enter", "open fix for selected finding"),
+    ("  1 / 2", "pick a username in the typo choice"),
+    ("", ""),
+    ("This screen", ""),
+    ("  ↑ / ↓ / j / k", "scroll one line"),
+    ("  PageUp / PageDown", "scroll 10 lines"),
+    ("  Home / End", "jump to top / bottom"),
+];
 
 /// State for the Discord-paste entry point (003-discord-paste-quick-add). `buffer` accumulates
 /// both bracketed-paste content and typed fallback input; it is never persisted or logged
@@ -573,6 +637,7 @@ impl App {
             KeyCode::Char('d') if self.focus != FocusArea::Username => self.action_delete(),
             KeyCode::Char('n') if self.focus != FocusArea::Username => self.action_rename(),
             KeyCode::Char('c') if self.focus != FocusArea::Username => self.action_assist(),
+            KeyCode::Char('?') if self.focus != FocusArea::Username => self.action_help(),
             KeyCode::Enter if self.focus == FocusArea::Detail => self.action_edit(),
             _ => match self.focus {
                 FocusArea::Username => {
@@ -856,6 +921,25 @@ impl App {
     }
 
     fn handle_modal_key(&mut self, key: KeyEvent) {
+        if let Some(Modal::Help(help)) = self.modal.as_mut() {
+            // Re-critique follow-up: the content outgrows a fixed box on realistic terminal
+            // heights — same scroll idiom as `AuditModal`'s own Report view (Up/Down/j/k by one
+            // line, PageUp/PageDown by ten, Home/End to the ends; `ui.rs` clamps against the real
+            // line count when rendering). Nothing here to cancel, so closing must not stomp
+            // whatever real status line (a lookup result, a write outcome) was showing before the
+            // clerk checked it.
+            match key.code {
+                KeyCode::Esc => self.modal = None,
+                KeyCode::Up | KeyCode::Char('k') => help.scroll = help.scroll.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => help.scroll = help.scroll.saturating_add(1),
+                KeyCode::PageUp => help.scroll = help.scroll.saturating_sub(10),
+                KeyCode::PageDown => help.scroll = help.scroll.saturating_add(10),
+                KeyCode::Home => help.scroll = 0,
+                KeyCode::End => help.scroll = (HELP_LINES.len() as u16).saturating_sub(1),
+                _ => {}
+            }
+            return;
+        }
         if key.code == KeyCode::Esc {
             if let Some(Modal::Audit(audit)) = self.modal.as_mut() {
                 if matches!(audit.view, AuditView::ChooseUsername { .. }) {
@@ -1033,6 +1117,8 @@ impl App {
                     },
                 },
                 Modal::Audit(_) => {}
+                // Intercepted by the early return at the top of this function — unreachable.
+                Modal::Help(_) => {}
             }
         }
 
@@ -1130,6 +1216,8 @@ impl App {
                 // text-entry-shaped state, `ChooseUsername`, just picks between two
                 // existing candidates), so a paste there is dropped, same as a keystroke.
                 Modal::Audit(_) => {}
+                // Pure display, no text field — dropped, same as a keystroke.
+                Modal::Help(_) => {}
             }
         } else if self.focus == FocusArea::Username {
             // No modal open: route to the main Lookup field, but only when it's actually
@@ -1632,6 +1720,16 @@ impl App {
             grant: None,
             scroll: 0,
         }));
+    }
+
+    /// Critique follow-up (P3): a `?`-triggered reference for every keybinding in the app —
+    /// secondary bindings (`j`/`k`, `[`/`]`, per-modal shortcuts) were each only discoverable by
+    /// opening the one screen that used them.
+    fn action_help(&mut self) {
+        if !self.begin_dialog() {
+            return;
+        }
+        self.modal = Some(Modal::Help(HelpModal { scroll: 0 }));
     }
 
     fn assist_awards_for_user(&self, username: &str) -> Vec<Award> {
@@ -2619,6 +2717,109 @@ mod tests {
         app.handle_key(key(KeyCode::Char('c')));
         assert!(app.modal.is_none());
         assert_eq!(app.username.value(), "c");
+    }
+
+    #[test]
+    fn question_mark_key_opens_help_modal() {
+        let (mut app, _rx) = test_app();
+        app.focus = FocusArea::Awards;
+        app.handle_key(key(KeyCode::Char('?')));
+        match &app.modal {
+            Some(Modal::Help(help)) => assert_eq!(help.scroll, 0),
+            other => panic!("expected Help modal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn question_mark_key_is_ignored_while_focus_is_on_the_username_field() {
+        let (mut app, _rx) = test_app();
+        // Default focus is Username; '?' should be typed into the field, not open Help.
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.modal.is_none());
+        assert_eq!(app.username.value(), "?");
+    }
+
+    #[test]
+    fn esc_closes_help_modal_without_touching_status() {
+        let (mut app, _rx) = test_app();
+        app.focus = FocusArea::Awards;
+        app.status = "torba_f · 1 award(s)".to_string();
+        app.handle_key(key(KeyCode::Char('?')));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.modal.is_none());
+        assert_eq!(app.status, "torba_f · 1 award(s)");
+    }
+
+    #[test]
+    fn help_modal_ignores_non_scroll_keys() {
+        let (mut app, _rx) = test_app();
+        app.focus = FocusArea::Awards;
+        app.handle_key(key(KeyCode::Char('?')));
+        app.handle_key(key(KeyCode::Char('a')));
+        match &app.modal {
+            Some(Modal::Help(help)) => assert_eq!(help.scroll, 0),
+            other => panic!("expected Help modal, got {other:?}"),
+        }
+    }
+
+    /// Re-critique follow-up: the Help screen's content (`HELP_LINES`, ~40 lines) outgrows a
+    /// fixed box on realistic terminal heights — this exercises the same scroll idiom as
+    /// `AuditModal`'s own Report view (`page_up_page_down_and_home_end_move_the_report_scroll`).
+    #[test]
+    fn help_modal_scroll_responds_to_the_full_key_set() {
+        let (mut app, _rx) = test_app();
+        app.focus = FocusArea::Awards;
+        app.handle_key(key(KeyCode::Char('?')));
+
+        app.handle_key(key(KeyCode::Down));
+        match &app.modal {
+            Some(Modal::Help(help)) => assert_eq!(help.scroll, 1),
+            other => panic!("expected Help modal, got {other:?}"),
+        }
+
+        app.handle_key(key(KeyCode::Char('j')));
+        match &app.modal {
+            Some(Modal::Help(help)) => assert_eq!(help.scroll, 2),
+            other => panic!("expected Help modal, got {other:?}"),
+        }
+
+        app.handle_key(key(KeyCode::Char('k')));
+        match &app.modal {
+            Some(Modal::Help(help)) => assert_eq!(help.scroll, 1),
+            other => panic!("expected Help modal, got {other:?}"),
+        }
+
+        app.handle_key(key(KeyCode::Up));
+        match &app.modal {
+            Some(Modal::Help(help)) => assert_eq!(help.scroll, 0, "saturating_sub floors at 0"),
+            other => panic!("expected Help modal, got {other:?}"),
+        }
+
+        app.handle_key(key(KeyCode::PageDown));
+        match &app.modal {
+            Some(Modal::Help(help)) => assert_eq!(help.scroll, 10),
+            other => panic!("expected Help modal, got {other:?}"),
+        }
+
+        app.handle_key(key(KeyCode::PageUp));
+        match &app.modal {
+            Some(Modal::Help(help)) => assert_eq!(help.scroll, 0),
+            other => panic!("expected Help modal, got {other:?}"),
+        }
+
+        app.handle_key(key(KeyCode::End));
+        match &app.modal {
+            Some(Modal::Help(help)) => {
+                assert_eq!(help.scroll, (HELP_LINES.len() as u16) - 1);
+            }
+            other => panic!("expected Help modal, got {other:?}"),
+        }
+
+        app.handle_key(key(KeyCode::Home));
+        match &app.modal {
+            Some(Modal::Help(help)) => assert_eq!(help.scroll, 0),
+            other => panic!("expected Help modal, got {other:?}"),
+        }
     }
 
     // ---------- Selecting an audit finding jumps into the matching fix flow ----------

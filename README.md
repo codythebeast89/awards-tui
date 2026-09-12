@@ -83,6 +83,7 @@ Purple dark layout: username bar, fixed **Actions** pane, tabbed **Awards** list
 | d | Delete selected award (type `delete` to confirm) |
 | n | Rename current user across all sheet cells (type `rename` to confirm) |
 | c / Assist | Clerk assist: check award request (MCAB/MCIB/MCMB); Enter to grant if eligible |
+| ? | Show the full keybinding reference screen |
 | F5 / Ctrl+R | Refresh sheet data |
 | Tab | Cycle focus |
 | Ctrl+Q | Quit |

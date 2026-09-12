@@ -11,7 +11,8 @@ use awards_core::{
 };
 use awards_core::{Award, AwardDef, AwardsData};
 use awards_sheets::{
-    add_award_to_user, auth_status, build_awards_data, login, update_award_cell, EditResult,
+    account_label, add_award_to_user, auth_status, build_awards_data, can_sign_out, login,
+    logout, update_award_cell, EditError, EditResult,
 };
 use std::sync::mpsc;
 use std::thread;
@@ -29,6 +30,40 @@ pub enum AuthState {
     /// `login()` is running on a background thread — the Sign In control shows a spinner and is
     /// disabled while this holds.
     SigningIn,
+}
+
+/// The visual weight `ui.rs` gives the status line — critique follow-up (007-gui-edit polish):
+/// every status update used to render as the same muted gray, so a refused write and a
+/// successful one were visually identical. `Success`/`Error` are reserved for the outcome of a
+/// clerk-deliberate action (Add, Edit, Sign In); routine/automatic updates (sync progress,
+/// lookup results, guardrail nudges) stay `Info` so the accent and error colors keep the rarity
+/// `DESIGN.md`'s Single-Accent Rule already commits to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusKind {
+    Info,
+    Success,
+    Error,
+}
+
+/// Turns a write result into clerk-facing status text and its `StatusKind` — critique follow-up:
+/// an `EditError::Api` failure (network/auth/HTTP) previously reached the clerk as a raw string
+/// like `"Sheets API HTTP 401: {...}"`. That detail is still worth having for diagnosis, so it
+/// goes to stderr, but the clerk now sees plain language and a next step instead. Every other
+/// `EditError` variant's message passes through unchanged — `edit.rs`'s own doc comment commits
+/// to those staying byte-identical for its other caller (the TUI), and they're already specific
+/// and actionable (e.g. `cell_stale_message`).
+fn describe_result(result: &EditResult) -> (String, StatusKind) {
+    if result.ok {
+        return (result.message.clone(), StatusKind::Success);
+    }
+    if let Some(EditError::Api(detail)) = &result.error {
+        eprintln!("awards-gui: Sheets API call failed: {detail}");
+        return (
+            "Couldn't reach Google Sheets. Check your connection and try again.".to_string(),
+            StatusKind::Error,
+        );
+    }
+    (result.message.clone(), StatusKind::Error)
 }
 
 /// Everything a background thread can report back to the UI thread, the `awards-gui` equivalent
@@ -122,6 +157,12 @@ pub struct GuiApp {
     pub looked_up: Option<LookedUpUser>,
 
     pub auth: AuthState,
+    /// Best-effort "who's signed in" label, refreshed alongside `auth`. `None` when signed out,
+    /// or (rarely) when signed in but nothing on disk yields a readable identity.
+    pub account_label: Option<String>,
+    /// Whether the Sign Out control should render at all — `false` under a service account,
+    /// which is a shared standing credential file, not a per-session login to end.
+    pub can_sign_out: bool,
 
     pub add_picker: Option<AddPicker>,
 
@@ -129,6 +170,8 @@ pub struct GuiApp {
 
     /// One-line status/result message, shown at the bottom of the window.
     pub status: String,
+    /// The visual weight `ui.rs` gives `status` — see `StatusKind`.
+    pub status_kind: StatusKind,
 }
 
 impl GuiApp {
@@ -150,13 +193,24 @@ impl GuiApp {
             username_input: String::new(),
             looked_up: None,
             auth: AuthState::Unknown,
+            account_label: None,
+            can_sign_out: false,
             add_picker: None,
             edit: None,
             status: String::new(),
+            status_kind: StatusKind::Info,
         };
         app.refresh_auth_state();
         app.start_sync();
         app
+    }
+
+    /// The only place `status`/`status_kind` are written together, so the two can never drift out
+    /// of sync — a stale `Error`/`Success` kind surviving into an unrelated later `Info` message
+    /// was exactly the bug this replaces (critique follow-up).
+    fn set_status(&mut self, message: impl Into<String>, kind: StatusKind) {
+        self.status = message.into();
+        self.status_kind = kind;
     }
 
     /// Maps `awards_sheets::auth_status()`'s four raw string values into `AuthState` — the only
@@ -167,6 +221,12 @@ impl GuiApp {
             "service_account" | "oauth_token" => AuthState::SignedIn,
             _ => AuthState::SignedOut,
         };
+        self.account_label = if self.auth == AuthState::SignedIn {
+            account_label()
+        } else {
+            None
+        };
+        self.can_sign_out = can_sign_out();
     }
 
     /// Kicks off the initial (and any later Refresh, 005-gui-refresh) sheet sync on a background
@@ -179,7 +239,7 @@ impl GuiApp {
             return;
         }
         self.syncing = true;
-        self.status = "Syncing...".to_string();
+        self.set_status("Syncing...", StatusKind::Info);
         let tx = self.tx.clone();
         thread::spawn(move || {
             let result = build_awards_data(None).map_err(|e| e.to_string());
@@ -212,11 +272,17 @@ impl GuiApp {
         match result {
             Ok(data) => {
                 self.sync_error = None;
-                self.status = format!("Synced — {} known award(s) in catalog", data.catalog.len());
+                // Routine/automatic, not a clerk-deliberate action — stays Info (see StatusKind).
+                self.set_status(
+                    format!("Synced — {} known award(s) in catalog", data.catalog.len()),
+                    StatusKind::Info,
+                );
                 self.data = Some(data);
             }
             Err(err) => {
-                self.status = format!("Sync failed: {err}");
+                // A sync failure blocks every other capability, so it earns Error even though
+                // sync itself is routine.
+                self.set_status(format!("Sync failed: {err}"), StatusKind::Error);
                 self.sync_error = Some(err);
             }
         }
@@ -232,15 +298,20 @@ impl GuiApp {
             return;
         }
         let Some(data) = self.data.as_ref() else {
-            self.status = match &self.sync_error {
-                Some(err) => format!("Sync failed: {err} — no data to look up"),
-                None => "Still syncing — try again shortly".to_string(),
+            match &self.sync_error {
+                Some(err) => self.set_status(
+                    format!("Sync failed: {err} — no data to look up"),
+                    StatusKind::Error,
+                ),
+                None => {
+                    self.set_status("Still syncing — try again shortly", StatusKind::Info);
+                }
             };
             return;
         };
         let username = self.username_input.trim().to_string();
         if username.is_empty() {
-            self.status = "Enter a username to look up".to_string();
+            self.set_status("Enter a username to look up", StatusKind::Info);
             return;
         }
         let awards = get_awards_for_username(&data.index, &username);
@@ -250,9 +321,12 @@ impl GuiApp {
                 awards: Vec::new(),
                 not_found: true,
             });
-            self.status = "No records found for that username".to_string();
+            self.set_status("No records found for that username", StatusKind::Info);
         } else {
-            self.status = format!("{username} · {} award(s)", awards.len());
+            self.set_status(
+                format!("{username} · {} award(s)", awards.len()),
+                StatusKind::Info,
+            );
             self.looked_up = Some(LookedUpUser {
                 username,
                 awards,
@@ -272,7 +346,7 @@ impl GuiApp {
     /// opening an empty picker (spec Edge Case).
     pub fn open_add_picker(&mut self) {
         let (Some(data), Some(looked_up)) = (self.data.as_ref(), self.looked_up.as_ref()) else {
-            self.status = "Look up a user before adding an award".to_string();
+            self.set_status("Look up a user before adding an award", StatusKind::Info);
             return;
         };
         let owned = owned_award_columns(&looked_up.awards, &looked_up.username);
@@ -283,7 +357,7 @@ impl GuiApp {
             .cloned()
             .collect();
         if candidates.is_empty() {
-            self.status = "No remaining awards to add for this user".to_string();
+            self.set_status("No remaining awards to add for this user", StatusKind::Info);
             return;
         }
         // Only one in-progress write flow at a time (mirrors the TUI's single-modal rule,
@@ -316,8 +390,8 @@ impl GuiApp {
         }
     }
 
-    /// Closes the picker with no side effect — matches the TUI's Esc-cancel *outcome* (nothing
-    /// happens), even though there is no literal Esc keybinding for a window.
+    /// Closes the picker with no side effect. `ui.rs::render` binds `Escape` to this, matching
+    /// the TUI's own Esc-cancel behavior.
     pub fn cancel_add(&mut self) {
         self.add_picker = None;
     }
@@ -361,6 +435,7 @@ impl GuiApp {
     }
 
     fn handle_add_done(&mut self, username: String, result: EditResult) {
+        let (status, kind) = describe_result(&result);
         if result.ok {
             if let Some(award) = result.award.as_ref() {
                 // Keep the shared index in sync (mirrors awards-tui's apply_add_result calling
@@ -378,15 +453,14 @@ impl GuiApp {
                 }
             }
             self.add_picker = None;
-            self.status = result.message;
         } else {
             // Stale/Conflict/etc: refuse and let the clerk retry without losing their
             // in-progress selection (spec Acceptance Scenario 2.4) — never a silent overwrite.
             if let Some(picker) = self.add_picker.as_mut() {
                 picker.submitting = false;
             }
-            self.status = result.message;
         }
+        self.set_status(status, kind);
     }
 
     // ---- User Story 3: Edit (spec 007-gui-edit) ------------------------------------------------
@@ -415,7 +489,8 @@ impl GuiApp {
         }
     }
 
-    /// Closes the flow with no write — matches the TUI's Esc-cancel outcome (nothing happens).
+    /// Closes the flow with no write. `ui.rs::render` binds `Escape` to this, matching the TUI's
+    /// own Esc-cancel behavior.
     pub fn cancel_edit(&mut self) {
         self.edit = None;
     }
@@ -468,6 +543,7 @@ impl GuiApp {
     /// happens, matching the TUI's `apply_edit_result` "no longer under @user" behavior
     /// (research.md §2) without duplicating its username-comparison logic.
     fn handle_edit_done(&mut self, viewed_username: String, result: EditResult) {
+        let (status, kind) = describe_result(&result);
         if result.ok {
             let mut moved_away = false;
             if let Some(award) = result.award.as_ref() {
@@ -489,18 +565,19 @@ impl GuiApp {
                 }
             }
             self.edit = None;
-            self.status = if moved_away {
-                format!("{} · no longer under @{viewed_username}", result.message)
+            let status = if moved_away {
+                format!("{status} · no longer under @{viewed_username}")
             } else {
-                result.message
+                status
             };
+            self.set_status(status, kind);
         } else {
             // Stale/Conflict/Validation/etc: refuse and let the clerk retry without losing their
             // in-progress edit, matching Add's own refusal handling.
             if let Some(edit) = self.edit.as_mut() {
                 edit.submitting = false;
             }
-            self.status = result.message;
+            self.set_status(status, kind);
         }
     }
 
@@ -511,7 +588,7 @@ impl GuiApp {
             return;
         }
         self.auth = AuthState::SigningIn;
-        self.status = "Signing in...".to_string();
+        self.set_status("Signing in...", StatusKind::Info);
         let tx = self.tx.clone();
         thread::spawn(move || {
             let result = login().map_err(|e| e.to_string());
@@ -522,12 +599,23 @@ impl GuiApp {
 
     fn handle_login_done(&mut self, result: Result<String, String>) {
         match result {
-            Ok(msg) => self.status = msg,
-            Err(msg) => self.status = msg,
+            Ok(msg) => self.set_status(msg, StatusKind::Success),
+            Err(msg) => self.set_status(msg, StatusKind::Error),
         }
         // Re-derive from auth_status() rather than assuming Ok means SignedIn — mirrors what
         // login() itself guarantees (or doesn't) about the on-disk token.
         self.refresh_auth_state();
+    }
+
+    /// Ends the current OAuth session (no-op under a service account — see `can_sign_out`) and
+    /// discards any in-progress write flow, since both are gated on `SignedIn` and would
+    /// otherwise sit open with no way to actually confirm.
+    pub fn sign_out(&mut self) {
+        logout();
+        self.add_picker = None;
+        self.edit = None;
+        self.refresh_auth_state();
+        self.set_status("Signed out.", StatusKind::Info);
     }
 }
 
@@ -586,9 +674,12 @@ mod tests {
             username_input: String::new(),
             looked_up: None,
             auth: AuthState::Unknown,
+            account_label: None,
+            can_sign_out: false,
             add_picker: None,
             edit: None,
             status: String::new(),
+            status_kind: StatusKind::Info,
         }
     }
 
@@ -799,6 +890,7 @@ mod tests {
         assert!(app.add_picker.is_none());
         assert_eq!(app.looked_up.unwrap().awards.len(), 2);
         assert_eq!(app.status, "Added Air Assault Badge");
+        assert_eq!(app.status_kind, StatusKind::Success);
     }
 
     /// Regression test for converge finding F1: looking up a different user and then looking the
@@ -872,6 +964,38 @@ mod tests {
         assert!(!picker.submitting);
         assert_eq!(picker.selected, Some(candidate));
         assert_eq!(app.looked_up.unwrap().awards.len(), 1);
+        assert_eq!(app.status_kind, StatusKind::Error);
+    }
+
+    /// Critique follow-up: a raw `EditError::Api` string (network/auth/HTTP detail) must not
+    /// reach the clerk verbatim — `describe_result` swaps it for plain language.
+    #[test]
+    fn handle_add_done_api_failure_shows_plain_language_not_the_raw_error() {
+        let mut app = no_data_app();
+        app.handle_msg(GuiMsg::SyncDone(Ok(sample_data())));
+        app.username_input = "torba_f".to_string();
+        app.submit_lookup();
+        app.open_add_picker();
+        let candidate = app.add_picker.as_ref().unwrap().candidates[0].clone();
+        app.select(candidate);
+
+        app.handle_add_done(
+            "torba_f".to_string(),
+            EditResult {
+                ok: false,
+                message: "Sheets API HTTP 401: {\"error\":\"invalid_grant\"}".to_string(),
+                error: Some(EditError::Api(
+                    "HTTP 401: {\"error\":\"invalid_grant\"}".to_string(),
+                )),
+                award: None,
+                awards: Vec::new(),
+            },
+        );
+        assert_eq!(
+            app.status,
+            "Couldn't reach Google Sheets. Check your connection and try again."
+        );
+        assert_eq!(app.status_kind, StatusKind::Error);
     }
 
     #[test]
@@ -885,6 +1009,7 @@ mod tests {
         app.auth = AuthState::SigningIn;
         app.handle_login_done(Ok("Signed in.".to_string()));
         assert_eq!(app.status, "Signed in.");
+        assert_eq!(app.status_kind, StatusKind::Success);
         assert_ne!(app.auth, AuthState::SigningIn);
     }
 
@@ -894,6 +1019,7 @@ mod tests {
         app.auth = AuthState::SigningIn;
         app.handle_login_done(Err("No credentials found".to_string()));
         assert_eq!(app.status, "No credentials found");
+        assert_eq!(app.status_kind, StatusKind::Error);
         assert_ne!(app.auth, AuthState::SignedIn);
     }
 
@@ -1125,6 +1251,7 @@ mod tests {
         assert_eq!(awards.len(), 1);
         assert_eq!(awards[0].cell, "torba_f x2");
         assert_eq!(app.status, "Updated C5 → torba_f x2");
+        assert_eq!(app.status_kind, StatusKind::Success);
     }
 
     /// When the new cell text reassigns the award to a different username, the viewed user's
@@ -1192,6 +1319,7 @@ mod tests {
         assert!(!edit.submitting);
         assert_eq!(edit.input, "torba_f x2");
         assert_eq!(app.looked_up.unwrap().awards.len(), 1);
+        assert_eq!(app.status_kind, StatusKind::Error);
     }
 
     #[test]

@@ -24,10 +24,8 @@ pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(0xC9, 0xA2, 0x27);
 pub const ACCENT_HOVER: egui::Color32 = egui::Color32::from_rgb(0xDF, 0xC2, 0x4A);
 /// Widget outlines/separators.
 pub const BORDER: egui::Color32 = egui::Color32::from_rgb(0x3A, 0x3F, 0x46);
-/// Reserved for `007-gui-edit` and later features' failure-state styling — unused by this
-/// feature's own widgets (research.md §2), named now so a later feature has one red to pull
-/// from rather than inventing a second (spec FR-006).
-#[allow(dead_code)]
+/// The status line's failure color (critique follow-up, `app.rs::StatusKind::Error`) — reserved
+/// in `006-gui-visual-theme` for exactly this and left unpainted until now (spec FR-006).
 pub const ERROR: egui::Color32 = egui::Color32::from_rgb(0xC0, 0x45, 0x3A);
 
 /// Builds and applies this application's `Visuals` + `Style` to `ctx`. Called once, in

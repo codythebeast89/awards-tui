@@ -14,8 +14,8 @@ use thiserror::Error;
 
 pub use api::{a1, SheetsApi};
 pub use auth::{
-    auth_status, credentials_path, get_access_token, login, project_root, service_account_path,
-    token_path, AuthError,
+    account_label, auth_status, can_sign_out, credentials_path, get_access_token, login, logout,
+    project_root, service_account_path, token_path, AuthError,
 };
 pub use awards_core::{build_cell_value, find_first_empty_row};
 pub use edit::{
