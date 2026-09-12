@@ -22,3 +22,11 @@ audit-*.txt
 **/*.rs.bk
 .claude/skills/
 .specify/
+
+# graphify (knowledge-graph tooling) - graphify-out/ itself is committed so the
+# team starts with a shared map; these two are excluded per graphify's own
+# recommended .gitignore additions.
+# local per-run token-cost log, not shared state
+graphify-out/cost.json
+# regenerable extraction cache - skip to keep repo small
+graphify-out/cache/
