@@ -30,6 +30,7 @@
     "service stripe": "https://upload.wikimedia.org/wikipedia/commons/4/48/Service_stripe.jpg"
   },
   "ribbons": {
+    "medal of honor": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0e/Medal_of_Honor_ribbon.svg/1920px-Medal_of_Honor_ribbon.svg.png",
     "army distinguished service cross": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/06/Distinguished_Service_Cross_ribbon.svg/1920px-Distinguished_Service_Cross_ribbon.svg.png",
     "defense distinguished service": "https://upload.wikimedia.org/wikipedia/commons/thumb/3/34/Defense_Distinguished_Service_Medal_ribbon.svg/1920px-Defense_Distinguished_Service_Medal_ribbon.svg.png",
     "army distinguished service": "https://upload.wikimedia.org/wikipedia/commons/thumb/7/7d/U.S._Army_Distinguished_Service_Medal_ribbon.svg/1920px-U.S._Army_Distinguished_Service_Medal_ribbon.svg.png",
@@ -39,6 +40,7 @@
     "distinguished flying cross": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/81/Distinguished_Flying_Cross_ribbon.svg/1920px-Distinguished_Flying_Cross_ribbon.svg.png",
     "soldiers medal": "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e1/Soldier%27s_Medal_ribbon.svg/1920px-Soldier%27s_Medal_ribbon.svg.png",
     "bronze star": "https://upload.wikimedia.org/wikipedia/commons/thumb/9/95/Bronze_Star_Medal_ribbon.svg/1920px-Bronze_Star_Medal_ribbon.svg.png",
+    "purple heart": "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e3/Purple_Heart_ribbon.svg/1920px-Purple_Heart_ribbon.svg.png",
     "defense meritorious service": "https://upload.wikimedia.org/wikipedia/commons/thumb/5/56/Defense_Meritorious_Service_Medal_ribbon.svg/1920px-Defense_Meritorious_Service_Medal_ribbon.svg.png",
     "meritorious service": "https://upload.wikimedia.org/wikipedia/commons/thumb/e/eb/Meritorious_Service_Medal_ribbon.svg/1920px-Meritorious_Service_Medal_ribbon.svg.png",
     "air medal": "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1a/Air_Medal_ribbon.svg/1920px-Air_Medal_ribbon.svg.png",
