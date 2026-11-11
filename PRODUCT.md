@@ -4,17 +4,15 @@
 
 ## Platform
 
-`desktop` — two native binaries: a terminal TUI (`awards-tui`, ratatui/crossterm) and a desktop GUI (`awards-gui`, eframe/egui). No web surface.
+`desktop` — a terminal TUI (`awards-tui`, ratatui/crossterm). No GUI, no web surface.
 
 ## Stack
 
-Rust, 2021 edition. Workspace of four crates: `awards-core` (domain + parsing + eligibility), `awards-sheets` (Google Sheets API client), `awards-tui` (CLI + TUI), `awards-gui` (native desktop GUI). Primary GUI framework: eframe/egui 0.36.2.
+Rust, 2021 edition. Workspace of three crates: `awards-core` (domain + parsing + eligibility), `awards-sheets` (Google Sheets API client), `awards-tui` (CLI + TUI).
 
 ## Users
 
 **Primary: Logistics Clerks**, using the TUI. A team of Clerks, not one person.
-
-**Secondary: the same Clerks**, using the GUI as a desktop companion for lookups and edits.
 
 ## Product Purpose
 
@@ -26,7 +24,7 @@ The sheet is the source of truth; this tool is the clerk's **single view and edi
 
 ## Operating Context
 
-- A **Discord queue**: proof is handled and forwarded there; award issuing happens in the TUI/GUI from forwarded requests.
+- A **Discord queue**: proof is handled and forwarded there; award issuing happens in the TUI from forwarded requests.
 - Clerks paste raw Discord text (e.g. `ROBLOX Username: ...` / `Badge Requested: ...`) into a **Paste** buffer; the tool extracts a username and a confidently-matched award and pre-fills the Add flow.
 - **Clerk Assist** checks eligibility for master combat badges (MCAB ← ESB+CAB, MCIB ← EIB+CIB, MCMB ← EFMB+CMB) and grants them with a single Enter.
 - **Audit** produces a grouped findings list and a plain-text report, with one-key jumps into the matching fix (Delete / Edit / Rename).
@@ -40,19 +38,17 @@ The sheet is the source of truth; this tool is the clerk's **single view and edi
 - Audit with grouped findings and fix-jump navigation.
 - Award cells are written as `Username`, `Username x2`, or `Username - detail`.
 - Sheet row numbers carry CSV→live offsets (Badges +6, Ribbons +8, Foreign +7).
-- The GUI has **no theme switcher and no OS dark/light detection** — one fixed palette, forced dark.
 - The TUI theme is user-configurable via an optional TOML file (`bg`, `purple`, `dup`).
 
 ## Brand Commitments
 
 - Name: **FORSCom Decorations Database** (also "Awards TUI").
 - Voice: direct, tool-like, no-nonsense — a clerk's utility, not a marketing product.
-- The GUI's committed visual identity is a dark warm-neutral palette with a **brass/gold accent** (`crates/awards-gui/src/theme.rs`), evoking medals and decorations without imitating any real insignia. This is a binding commitment: it is the incumbent world and future GUI work inherits it.
-- The TUI's own palette is separately configurable and is deliberately **not** the GUI's palette.
+- The TUI's palette is independently configurable per-clerk via `awards-tui.toml`.
 
 ## Evidence on Hand
 
-- Source of truth: `crates/awards-gui/src/theme.rs` (the GUI palette), `crates/awards-gui/src/ui.rs` (the GUI panel structure), `crates/awards-tui/src/` (the TUI), `README.md` (workflow and key bindings), `specs/001`–`007/` (feature specifications).
+- Source of truth: `crates/awards-tui/src/` (the TUI), `README.md` (workflow and key bindings), `specs/001`–`003/` (feature specifications).
 - No testimonials, benchmarks, pricing, press, or customer case studies exist. Future work must not fabricate any of these.
 
 ## Product Principles
@@ -61,8 +57,7 @@ The sheet is the source of truth; this tool is the clerk's **single view and edi
 - **One lookup, everything visible.** A username typed once should reveal every award that user holds, without hunting.
 - **Every write goes through the clerk's own credentials.** OAuth gates are not optional theater; they are the mechanism.
 - **Proof stays with the clerk.** The tool parses pasted text and pre-fills flows; it never fetches, opens, or processes whatever the pasted text names as proof.
-- **Evolve, don't freeze.** The visual identity is committed and inherited, not sacred and untouchable — it can be evolved deliberately.
 
 ## Accessibility & Inclusion
 
-No accessibility standard has been formally adopted for this product. The GUI is a native desktop app with no screen-reader or keyboard-only contract established yet; the TUI is keyboard-driven by nature. Future GUI work should at minimum keep interactive elements reachable by keyboard and avoid conveying state by color alone.
+No accessibility standard has been formally adopted for this product. The TUI is keyboard-driven by nature; interactive elements should remain reachable by keyboard and avoid conveying state by color alone.
