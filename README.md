@@ -8,9 +8,48 @@ Tabs used: **Badges Database**, **Ribbons Database**, **Foreign Awards Database*
 
 ## Install
 
-### From source
+This is how you get the program onto your computer. It's a little like installing an app on your
+phone, except we use a black window with text instead of tapping icons. That black window is
+called a **"terminal"** (on a Mac, press Cmd+Space, type `Terminal`, press Enter; on Windows, search
+the Start Menu for `PowerShell`). You'll copy a line of text, paste it in, and press Enter. Do that
+for each line, one at a time, waiting for each one to finish before pasting the next.
 
-Requires a recent [Rust toolchain](https://rustup.rs/).
+You only need to pick **one** of the three options below — do not do all three.
+
+### Option 1 (easiest if you have a Mac): Homebrew
+
+1. If you don't already have "Homebrew" on your Mac, go to [brew.sh](https://brew.sh) and copy-paste
+   the one install command shown there into your terminal. Press Enter and wait for it to finish.
+2. Then paste these two lines into your terminal, one at a time:
+
+```bash
+brew tap codythebeast89/awards-tui https://github.com/codythebeast89/awards-tui
+brew install codythebeast89/awards-tui/awards-tui
+```
+
+That's it — the program is now installed.
+
+### Option 2 (Linux or Mac, no Homebrew): cargo-binstall
+
+This downloads a ready-made copy of the program instead of building it yourself.
+
+1. Install "cargo" first by following the instructions at [rustup.rs](https://rustup.rs/) (copy-paste
+   the one command shown there).
+2. Then paste this into your terminal:
+
+```bash
+cargo binstall --git https://github.com/codythebeast89/awards-tui awards-tui
+```
+
+If it asks "Do you want to continue?", type `y` and press Enter.
+
+### Option 3 (for developers, or if the above don't work): build it yourself
+
+This takes longer because your computer builds the program from scratch instead of downloading a
+finished copy.
+
+1. Install Rust by following the instructions at [rustup.rs](https://rustup.rs/).
+2. Paste these lines into your terminal, one at a time:
 
 ```bash
 git clone https://github.com/codythebeast89/awards-tui.git
@@ -18,51 +57,52 @@ cd awards-tui
 cargo install --path crates/awards-tui
 ```
 
-Or run without installing: `cargo run -p awards-tui --release`
+Prefer to just try it once without installing it permanently? Run `cargo run -p awards-tui --release`
+instead of the last line above.
 
-### cargo-binstall
+## Setup (only needed if you want to add/edit/delete awards, not just look them up)
 
-After a `v*` GitHub release (Linux/macOS assets):
+Looking up awards works immediately after install — no setup needed for that. The steps below are
+only for clerks who need to **write** changes back to the Google Sheet. It's a one-time setup.
 
-```bash
-cargo binstall --git https://github.com/codythebeast89/awards-tui awards-tui
-```
+Skip this entirely if you only ever want to look someone up.
 
-Release tarballs are named `awards-tui-<rust-target>.tar.gz` (see `[package.metadata.binstall]`).
+Here's the short version of what you're about to do: you're going to tell Google "it's okay for this
+program to edit my sheet, using my own account" — the same way a website asks "Sign in with Google."
 
-### Homebrew (tap)
-
-This repo includes `Formula/awards-tui.rb` so the GitHub repo can be used as a tap:
-
-```bash
-brew tap codythebeast89/awards-tui https://github.com/codythebeast89/awards-tui
-brew install codythebeast89/awards-tui/awards-tui
-# or: brew install --HEAD codythebeast89/awards-tui/awards-tui
-```
-
-## Setup (write access)
-
-Credentials are resolved from:
-
-1. `AWARDS_ROOT` (if set)
-2. The current directory (when it contains `award_columns.json`, `credentials.json`, `token.json`, etc.)
-3. `~/.config/awards-tui/` (created for installed binaries via binstall/Homebrew)
-
-A Google **API key alone cannot edit** the sheet. Use OAuth as your Logistics Clerk Google account (or a service account shared on the sheet).
-
-1. In [Google Cloud Console](https://console.cloud.google.com/): create/select a project → enable **Google Sheets API**.
-2. **APIs & Services → Credentials → Create credentials → OAuth client ID → Desktop app**.
-3. Download the JSON and save it as `credentials.json` in this folder (see `credentials.example.json`).
-4. Log in (browser opens):
+1. Open [Google Cloud Console](https://console.cloud.google.com/) in your web browser and sign in
+   with the same Google account you use for the Decorations Database sheet.
+2. At the top of the page, click to create a new project (or pick an existing one — any name is
+   fine). This is just Google's way of grouping things; you won't see it again after this.
+3. In the search bar at the top, type `Google Sheets API`, click the result, then click the blue
+   **Enable** button.
+4. On the left-hand menu, click **Credentials**. Click **+ Create Credentials** near the top, then
+   choose **OAuth client ID**.
+   - If it asks you to configure a "consent screen" first, pick **External**, fill in only the
+     required fields (an app name and your email are enough), and save.
+   - For "Application type," choose **Desktop app**. Give it any name. Click **Create**.
+5. A box will pop up with a **Download JSON** button. Click it — this saves a small file to your
+   computer's Downloads folder.
+6. Rename that downloaded file to exactly `credentials.json` and move it into this project's folder
+   (the same folder this `README.md` is in). There's an example file, `credentials.example.json`,
+   in that same folder if you want to see what it should look like.
+7. Back in your terminal, type:
 
 ```bash
 awards-tui --login
-# or: cargo run -p awards-tui --release -- --login
 ```
 
-That writes `token.json` (gitignored). Check status with `awards-tui --auth-status`.
+   Your web browser will open and ask you to sign in and approve access — this is normal and expected,
+   it's the same "it's okay for this program to edit my sheet" step mentioned above. Approve it.
 
-**Service account alternative:** place `service_account.json` in the project folder and share the Decorations spreadsheet with that service account email as Editor.
+That's it — you're done. The program saves a `token.json` file so you won't have to repeat this
+step again on this computer. You can check it worked by typing `awards-tui --auth-status`.
+
+**Something went wrong?** Delete `token.json` and run `awards-tui --login` again.
+
+**Note for IT admins:** a service-account alternative exists — place `service_account.json` in the
+project folder and share the Decorations spreadsheet with that service account's email as Editor —
+but the steps above are what most clerks should follow.
 
 ## Run
 
