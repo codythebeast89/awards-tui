@@ -60,7 +60,7 @@ cargo install --path crates/awards-tui
 Prefer to just try it once without installing it permanently? Run `cargo run -p awards-tui --release`
 instead of the last line above.
 
-## Setup (only needed if you want to add/edit/delete awards, not just look them up)
+## Setup (only needed if you are a Logistics Clerk)
 
 Looking up awards works immediately after install — no setup needed for that. The steps below are
 only for clerks who need to **write** changes back to the Google Sheet. It's a one-time setup.
@@ -99,10 +99,6 @@ That's it — you're done. The program saves a `token.json` file so you won't ha
 step again on this computer. You can check it worked by typing `awards-tui --auth-status`.
 
 **Something went wrong?** Delete `token.json` and run `awards-tui --login` again.
-
-**Note for IT admins:** a service-account alternative exists — place `service_account.json` in the
-project folder and share the Decorations spreadsheet with that service account's email as Editor —
-but the steps above are what most clerks should follow.
 
 ## Run
 
