@@ -238,13 +238,7 @@ fn find_user_award<'a>(
     if matches.len() > 1 {
         eprintln!("Ambiguous ({} matches). Be more specific:", matches.len());
         for a in matches.iter().take(20) {
-            eprintln!(
-                "  {} · {}{} · {:?}",
-                a.name,
-                a.col,
-                a.row,
-                a.cell
-            );
+            eprintln!("  {} · {}{} · {:?}", a.name, a.col, a.row, a.cell);
         }
         return Err(ExitCode::from(1));
     }
@@ -291,10 +285,7 @@ fn cmd_rename(old_username: &str, new_username: &str) -> anyhow::Result<ExitCode
     let result = rename_username(old_username, new_username, Some(&data), false);
     println!("{}", result.message);
     if !result.ok && !result.awards.is_empty() {
-        println!(
-            "Landed {} cell(s) before failure:",
-            result.awards.len()
-        );
+        println!("Landed {} cell(s) before failure:", result.awards.len());
         for award in &result.awards {
             println!("  {}!{}{}", award.sheet, award.col, award.row);
         }
@@ -333,7 +324,10 @@ fn cmd_grant(username: &str, award_query: &str) -> anyhow::Result<ExitCode> {
                 eprintln!("Could not find the sheet row to upgrade.");
                 return Ok(ExitCode::from(1));
             };
-            eprintln!("Writing {}!{}{} → {new_cell}…", target.sheet, target.col, target.row);
+            eprintln!(
+                "Writing {}!{}{} → {new_cell}…",
+                target.sheet, target.col, target.row
+            );
             let result = update_award_cell(target, new_cell, false);
             println!("{}", result.message);
             Ok(if result.ok {

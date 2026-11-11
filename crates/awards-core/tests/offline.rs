@@ -20,6 +20,23 @@ fn test_normalize() {
 }
 
 #[test]
+fn test_extract_username_display_preserves_case() {
+    assert_eq!(
+        extract_username_display(Some("CodyTheBeast89")).as_deref(),
+        Some("CodyTheBeast89")
+    );
+    assert_eq!(
+        extract_username_display(Some("@FooBar_1 - x2")).as_deref(),
+        Some("FooBar_1")
+    );
+    assert_eq!(
+        extract_username_display(Some("Alice  ")).as_deref(),
+        Some("Alice")
+    );
+    assert_eq!(extract_username_display(Some("")), None);
+}
+
+#[test]
 fn test_user_agent_includes_package_version() {
     assert!(
         USER_AGENT.contains(env!("CARGO_PKG_VERSION")),
@@ -237,6 +254,11 @@ fn test_build_cell_value() {
     assert_eq!(build_cell_value("Alice", ""), "Alice");
     assert_eq!(build_cell_value("@Bob", "x2"), "Bob x2");
     assert_eq!(build_cell_value("Carol", "Master"), "Carol - Master");
+    assert_eq!(
+        build_cell_value("CodyTheBeast89", ""),
+        "CodyTheBeast89",
+        "typed casing must survive into the sheet cell"
+    );
 }
 
 #[test]
@@ -514,7 +536,8 @@ fn test_extract_paste_fields_missing_award_line() {
 fn test_extract_paste_fields_first_of_two_stacked_username_lines_wins() {
     // Edge Case: two stacked requests / a reply-quote — the first match wins, the system never
     // silently combines or overwrites with a later line.
-    let sample = "ROBLOX Username: first_user\nBadge Requested: Some Badge\nROBLOX Username: second_user";
+    let sample =
+        "ROBLOX Username: first_user\nBadge Requested: Some Badge\nROBLOX Username: second_user";
     let extracted = extract_paste_fields(sample);
     assert_eq!(extracted.username.as_deref(), Some("first_user"));
 }

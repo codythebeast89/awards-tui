@@ -2,9 +2,9 @@
 
 use crate::api::{a1, ApiError, SheetsApi};
 use awards_core::{
-    build_cell_value, clean_cell, format_award_name, get_awards_for_username, match_row_in_window,
-    normalize_username, parse_bare_username, replace_username_in_cell, sheet_data_start_row, Award,
-    AwardDef, AwardsData,
+    build_cell_value, clean_cell, extract_username_display, format_award_name,
+    get_awards_for_username, match_row_in_window, normalize_username, parse_bare_username,
+    replace_username_in_cell, sheet_data_start_row, Award, AwardDef, AwardsData,
 };
 use std::collections::{BTreeMap, HashSet};
 use thiserror::Error;
@@ -110,7 +110,11 @@ fn live_cell_value(api: &SheetsApi, sheet: &str, col: &str, row: i32) -> Result<
 /// from `start` (1-based, inclusive). Returns the row plus the raw cell text,
 /// for the "@user already has this award" duplicate-add rejection.
 fn find_existing_row(col_vals: &[Vec<String>], start: i32, key: &str) -> Option<(i32, String)> {
-    for (i, row) in col_vals.iter().enumerate().skip((start - 1).max(0) as usize) {
+    for (i, row) in col_vals
+        .iter()
+        .enumerate()
+        .skip((start - 1).max(0) as usize)
+    {
         let cell = row.first().map(|s| s.as_str()).unwrap_or("");
         if normalize_username(Some(cell)).as_deref() == Some(key) {
             return Some(((i + 1) as i32, cell.to_string()));
@@ -123,7 +127,11 @@ fn find_existing_row(col_vals: &[Vec<String>], start: i32, key: &str) -> Option<
 /// scanning from `start` (1-based, inclusive); falls back to one past the
 /// last fetched row when the column has no empty cell in range.
 fn find_target_row(col_vals: &[Vec<String>], start: i32) -> i32 {
-    for (i, row) in col_vals.iter().enumerate().skip((start - 1).max(0) as usize) {
+    for (i, row) in col_vals
+        .iter()
+        .enumerate()
+        .skip((start - 1).max(0) as usize)
+    {
         let cell = row.first().map(|s| s.as_str()).unwrap_or("");
         if clean_cell(Some(cell)).is_empty() {
             return (i + 1) as i32;
@@ -171,14 +179,11 @@ pub fn add_award_to_user(
     suffix: &str,
     interactive_auth: bool,
 ) -> EditResult {
-    let user = username.trim().trim_start_matches('@');
-    if user.is_empty() {
-        return EditResult::err(EditError::Validation("Username required".into()));
-    }
-    let Some(key) = normalize_username(Some(user)) else {
+    let Some(display_user) = extract_username_display(Some(username)) else {
         return EditResult::err(EditError::Validation("Username required".into()));
     };
-    let cell_value = build_cell_value(user, suffix);
+    let key = display_user.to_ascii_lowercase();
+    let cell_value = build_cell_value(&display_user, suffix);
 
     let api = match SheetsApi::connect(interactive_auth) {
         Ok(api) => api,
@@ -199,7 +204,7 @@ pub fn add_award_to_user(
     let start = sheet_data_start_row(&award_def.sheet);
     if let Some((row, _cell)) = find_existing_row(&col_vals, start, &key) {
         return EditResult::err(EditError::Conflict(format!(
-            "@{user} already has {} (row {row})",
+            "@{display_user} already has {} (row {row})",
             award_def.base_name
         )));
     }
@@ -242,7 +247,7 @@ pub fn add_award_to_user(
     };
     EditResult::ok_msg(
         format!(
-            "Added {display} for @{user} at {}{target_row}",
+            "Added {display} for @{display_user} at {}{target_row}",
             award_def.col
         ),
         Some(award),
@@ -262,7 +267,9 @@ pub fn update_award_cell(award: &Award, new_cell: &str, interactive_auth: bool) 
         ));
     }
     if normalize_username(Some(new_cell)).is_none() {
-        return EditResult::err(EditError::Validation("Cell must start with a username".into()));
+        return EditResult::err(EditError::Validation(
+            "Cell must start with a username".into(),
+        ));
     }
 
     let api = match SheetsApi::connect(interactive_auth) {
@@ -292,7 +299,9 @@ pub fn update_award_cell(award: &Award, new_cell: &str, interactive_auth: bool) 
     }
 
     let Some(new_key) = normalize_username(Some(new_cell)) else {
-        return EditResult::err(EditError::Validation("Cell must start with a username".into()));
+        return EditResult::err(EditError::Validation(
+            "Cell must start with a username".into(),
+        ));
     };
     let old_key = normalize_username(Some(&award.cell));
     if old_key.as_deref() != Some(new_key.as_str()) {
@@ -423,7 +432,11 @@ fn column_foreign_username(
     key: &str,
     allowed_rows: &HashSet<i32>,
 ) -> Option<i32> {
-    for (i, row) in col_vals.iter().enumerate().skip((data_start_row - 1) as usize) {
+    for (i, row) in col_vals
+        .iter()
+        .enumerate()
+        .skip((data_start_row - 1) as usize)
+    {
         let sheet_row = (i + 1) as i32;
         if allowed_rows.contains(&sheet_row) {
             continue;
@@ -438,7 +451,12 @@ fn column_foreign_username(
 
 fn format_remaining_ranges(ranges: &[String]) -> String {
     const SHOW: usize = 8;
-    let sample = ranges.iter().take(SHOW).cloned().collect::<Vec<_>>().join(", ");
+    let sample = ranges
+        .iter()
+        .take(SHOW)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
     if ranges.len() > SHOW {
         format!("{sample} +{} more", ranges.len() - SHOW)
     } else {
@@ -534,8 +552,7 @@ pub fn rename_username(
                 continue;
             };
 
-            if let Some(row) =
-                match_row_in_window(&col_vals, col_start_row, &award.cell, award.row)
+            if let Some(row) = match_row_in_window(&col_vals, col_start_row, &award.cell, award.row)
             {
                 let live = clean_cell(
                     col_vals
@@ -567,9 +584,12 @@ pub fn rename_username(
                         allowed_rows.insert(row);
                         continue;
                     }
-                    let display =
-                        format_award_name(&award.category, Some(award.base_name.as_str()), &new_cell)
-                            .unwrap_or_else(|| award.name.clone());
+                    let display = format_award_name(
+                        &award.category,
+                        Some(award.base_name.as_str()),
+                        &new_cell,
+                    )
+                    .unwrap_or_else(|| award.name.clone());
                     let updated = Award {
                         category: award.category,
                         name: display,
@@ -600,12 +620,9 @@ pub fn rename_username(
                         .map(|s| s.as_str()),
                 );
                 if normalize_username(Some(&live)).as_deref() == Some(new_key.as_str()) {
-                    let display = format_award_name(
-                        &award.category,
-                        Some(award.base_name.as_str()),
-                        &live,
-                    )
-                    .unwrap_or_else(|| award.name.clone());
+                    let display =
+                        format_award_name(&award.category, Some(award.base_name.as_str()), &live)
+                            .unwrap_or_else(|| award.name.clone());
                     done_awards.push(Award {
                         category: award.category,
                         name: display,
@@ -623,13 +640,16 @@ pub fn rename_username(
             skipped += 1;
         }
 
-        if let Some(row) =
-            column_foreign_username(&col_vals, data_start, &new_key, &allowed_rows)
-        {
+        if let Some(row) = column_foreign_username(&col_vals, data_start, &new_key, &allowed_rows) {
             let sample_name = pending
                 .first()
                 .map(|(_, _, a)| a)
-                .or_else(|| done_awards.iter().rev().find(|a| a.sheet == sheet && a.col == col))
+                .or_else(|| {
+                    done_awards
+                        .iter()
+                        .rev()
+                        .find(|a| a.sheet == sheet && a.col == col)
+                })
                 .map(|a| {
                     if a.base_name.is_empty() {
                         a.name.clone()
@@ -679,12 +699,7 @@ pub fn rename_username(
             .map(|(range, _, _)| range.clone())
             .collect();
         let mut updated: Vec<Award> = done_awards;
-        updated.extend(
-            writes
-                .into_iter()
-                .take(written)
-                .map(|(_, _, award)| award),
-        );
+        updated.extend(writes.into_iter().take(written).map(|(_, _, award)| award));
         if updated.is_empty() {
             return EditResult::err(EditError::Api(format!("Rename write failed: {err}")));
         }
@@ -703,9 +718,7 @@ pub fn rename_username(
     let written_count = writes.len();
     let mut updated: Vec<Award> = done_awards;
     updated.extend(writes.into_iter().map(|(_, _, award)| award));
-    let mut message = format!(
-        "Renamed @{old_key} → {display_new} in {written_count} cell(s)"
-    );
+    let mut message = format!("Renamed @{old_key} → {display_new} in {written_count} cell(s)");
     if already_done > 0 {
         message.push_str(&format!(" · {already_done} already done"));
     }
@@ -825,7 +838,11 @@ mod tests {
             vec!["".into()],
             vec!["carol".into()],
         ];
-        assert_eq!(find_target_row(&with_gap, 2), 3, "row 3 is the first empty cell");
+        assert_eq!(
+            find_target_row(&with_gap, 2),
+            3,
+            "row 3 is the first empty cell"
+        );
 
         let full = vec![
             vec!["Header".into()],
@@ -876,12 +893,17 @@ mod tests {
         );
 
         // Sanity: the real call sites route into the categories this test expects.
-        let dup_add = add_award_to_user("", &AwardDef {
-            category: "badges".into(),
-            sheet: "Badges Database".into(),
-            col: "C".into(),
-            base_name: "Test".into(),
-        }, "", false);
+        let dup_add = add_award_to_user(
+            "",
+            &AwardDef {
+                category: "badges".into(),
+                sheet: "Badges Database".into(),
+                col: "C".into(),
+                base_name: "Test".into(),
+            },
+            "",
+            false,
+        );
         assert!(matches!(dup_add.error, Some(EditError::Validation(_))));
 
         let bad_rename = rename_username("alice", "Bob - Master", None, false);

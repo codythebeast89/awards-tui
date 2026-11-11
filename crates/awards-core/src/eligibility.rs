@@ -85,10 +85,7 @@ struct MasterCombatRule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrantPlan {
     /// Find the user's award whose `base_name` matches, rewrite cell to `new_cell`.
-    UpgradeCell {
-        base_name: String,
-        new_cell: String,
-    },
+    UpgradeCell { base_name: String, new_cell: String },
 }
 
 /// Discord / clerk workflow reminders (manual — no bot).
@@ -173,7 +170,10 @@ impl AssistVerdict {
                     "Prerequisites: satisfied.".to_string(),
                 ];
                 match grant {
-                    GrantPlan::UpgradeCell { base_name, new_cell } => {
+                    GrantPlan::UpgradeCell {
+                        base_name,
+                        new_cell,
+                    } => {
                         lines.push(format!("Grant plan: edit `{base_name}` → `{new_cell}`"));
                     }
                 }
@@ -263,7 +263,10 @@ fn cell_detail_tokens(cell: &str) -> Vec<String> {
     text[dash + 3..]
         .split(|c: char| c.is_whitespace() || c == ',' || c == '/')
         .filter(|t| !t.is_empty())
-        .map(|t| t.trim_matches(|c: char| c == '(' || c == ')').to_ascii_uppercase())
+        .map(|t| {
+            t.trim_matches(|c: char| c == '(' || c == ')')
+                .to_ascii_uppercase()
+        })
         .filter(|t| !t.is_empty())
         .collect()
 }
@@ -285,10 +288,7 @@ fn has_expert_badge(awards: &[Award], rule: &MasterCombatRule) -> bool {
 }
 
 fn combat_rows<'a>(awards: &'a [Award], combat_base: &str) -> Vec<&'a Award> {
-    awards
-        .iter()
-        .filter(|a| base_eq(a, combat_base))
-        .collect()
+    awards.iter().filter(|a| base_eq(a, combat_base)).collect()
 }
 
 fn is_master_on_combat(award: &Award, display_name: &str) -> bool {
@@ -508,7 +508,10 @@ mod tests {
         let v = check_assist("MaoZhuuDong", &awards, "MCAB");
         match v {
             AssistVerdict::Approve { grant, .. } => match grant {
-                GrantPlan::UpgradeCell { base_name, new_cell } => {
+                GrantPlan::UpgradeCell {
+                    base_name,
+                    new_cell,
+                } => {
                     assert_eq!(base_name, "Combat Action Badge");
                     assert_eq!(new_cell, "MaoZhuuDong - MC");
                 }
@@ -519,11 +522,7 @@ mod tests {
 
     #[test]
     fn mcab_deny_missing_esb() {
-        let awards = vec![award(
-            "Combat Action Badge",
-            "Combat Action Badge",
-            "alice",
-        )];
+        let awards = vec![award("Combat Action Badge", "Combat Action Badge", "alice")];
         let v = check_assist("alice", &awards, "Master CAB");
         match v {
             AssistVerdict::Deny { reasons, .. } => {
@@ -563,7 +562,10 @@ mod tests {
             AssistVerdict::Approve { grant, award, .. } => {
                 assert_eq!(award, AssistAward::MasterCib);
                 match grant {
-                    GrantPlan::UpgradeCell { base_name, new_cell } => {
+                    GrantPlan::UpgradeCell {
+                        base_name,
+                        new_cell,
+                    } => {
                         assert_eq!(base_name, "Combat Infantryman Badge");
                         assert_eq!(new_cell, "user - MC");
                     }

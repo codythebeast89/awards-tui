@@ -40,7 +40,11 @@ pub fn match_row_in_window(
     hits.into_iter().min_by_key(|r| (r - hint_row).abs())
 }
 
-pub fn normalize_username(cell: Option<&str>) -> Option<String> {
+/// Extract the leading Roblox username from a cell or typed input, preserving case.
+///
+/// Unlike [`normalize_username`], this keeps the casing the clerk typed / the sheet
+/// already stores so new award writes can match it (e.g. `CodyTheBeast89`).
+pub fn extract_username_display(cell: Option<&str>) -> Option<String> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"^@?([A-Za-z0-9_]+)").unwrap());
     let text = clean_cell(cell);
@@ -48,7 +52,11 @@ pub fn normalize_username(cell: Option<&str>) -> Option<String> {
         return None;
     }
     re.captures(&text)
-        .map(|c| c.get(1).unwrap().as_str().to_ascii_lowercase())
+        .map(|c| c.get(1).unwrap().as_str().to_string())
+}
+
+pub fn normalize_username(cell: Option<&str>) -> Option<String> {
+    extract_username_display(cell).map(|s| s.to_ascii_lowercase())
 }
 
 /// Parse a bare Roblox username (optional `@`, letters/digits/`_` only).

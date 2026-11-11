@@ -92,7 +92,11 @@ fn render_top(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme) {
         Paragraph::new("Enter=Lookup")
             .style(Style::default().fg(theme.purple).bg(theme.panel_alt))
             .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::ALL).border_style(theme.border)),
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(theme.border),
+            ),
         top[2],
     );
 }
@@ -144,7 +148,11 @@ fn render_actions(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Them
 }
 
 fn render_awards(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme) {
-    let block = panel_block(" Awards ", focus_border(app, FocusArea::Awards, theme), theme);
+    let block = panel_block(
+        " Awards ",
+        focus_border(app, FocusArea::Awards, theme),
+        theme,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -209,7 +217,11 @@ fn render_awards(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: &Theme
 }
 
 fn render_detail(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &Theme) {
-    let block = panel_block(" Detail ", focus_border(app, FocusArea::Detail, theme), theme);
+    let block = panel_block(
+        " Detail ",
+        focus_border(app, FocusArea::Detail, theme),
+        theme,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -348,7 +360,9 @@ fn render_help_modal(frame: &mut Frame<'_>, help: &HelpModal, area: Rect, theme:
             } else if desc.is_empty() {
                 Line::from(Span::styled(
                     key,
-                    Style::default().fg(theme.purple).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.purple)
+                        .add_modifier(Modifier::BOLD),
                 ))
             } else {
                 Line::from(vec![
@@ -495,7 +509,11 @@ fn render_add_modal(
                     .collect::<Vec<ListItem<'_>>>()
             };
             let list = List::new(items)
-                .block(Block::default().borders(Borders::ALL).border_style(theme.border))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(theme.border),
+                )
                 .highlight_style(
                     Style::default()
                         .fg(theme.text)
@@ -806,9 +824,12 @@ fn render_assist_modal(
                 ])
                 .split(inner);
             frame.render_widget(
-                Paragraph::new(format!("User @{}
-Requested award (e.g. MCAB)", assist.username))
-                    .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
+                Paragraph::new(format!(
+                    "User @{}
+Requested award (e.g. MCAB)",
+                    assist.username
+                ))
+                .style(Style::default().fg(theme.muted).bg(theme.panel_alt)),
                 chunks[0],
             );
             render_text_input(
@@ -903,7 +924,9 @@ fn render_audit_findings_list(
             .map(|row| match row {
                 AuditRow::Header(label) => ListItem::new(Span::styled(
                     label,
-                    Style::default().fg(theme.purple).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.purple)
+                        .add_modifier(Modifier::BOLD),
                 )),
                 AuditRow::Item(finding) => ListItem::new(Span::styled(
                     format!("  {}", describe_finding(finding)),

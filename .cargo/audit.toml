@@ -1,0 +1,13 @@
+# cargo-audit config. See CI: .github/workflows/rust.yml (audit job).
+#
+# Both ignores below come from jsonwebtoken's `rust_crypto` backend, used in
+# crates/awards-sheets/src/auth.rs for service-account JWT signing (RS256).
+# jsonwebtoken (even at its latest 11.1.0, checked 2026-11) still depends on
+# the vulnerable rsa/crypto-bigint versions itself — there is no newer
+# jsonwebtoken release to bump to yet. Revisit by bumping jsonwebtoken (or
+# switching its crypto backend to `aws_lc_rs`) once upstream patches this.
+[advisories]
+ignore = [
+    "RUSTSEC-2023-0071", # rsa: Marvin Attack timing side-channel
+    "RUSTSEC-2026-0387", # crypto-bigint: timing variability issues
+]

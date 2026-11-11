@@ -142,7 +142,10 @@ mod tests {
 
     #[test]
     fn parse_hex() {
-        assert_eq!(parse_hex_color("#a78bfa").unwrap(), Color::Rgb(167, 139, 250));
+        assert_eq!(
+            parse_hex_color("#a78bfa").unwrap(),
+            Color::Rgb(167, 139, 250)
+        );
     }
 
     #[test]
@@ -163,6 +166,8 @@ dup = "#ff0000"
     #[test]
     fn candidates_include_cwd() {
         let paths = config_candidates();
-        assert!(paths.iter().any(|p| p.file_name() == Some(Path::new("awards-tui.toml").as_os_str())));
+        assert!(paths
+            .iter()
+            .any(|p| p.file_name() == Some(Path::new("awards-tui.toml").as_os_str())));
     }
 }

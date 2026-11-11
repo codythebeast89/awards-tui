@@ -11,6 +11,18 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Release builds are tagged `v*`; CI runs tests and clippy before publishing binaries.
 
+### Live Sheets-API test (opt-in, not run by CI)
+
+`crates/awards-sheets/src/edit.rs` has one `#[ignore]`d test, `live_add_then_delete_roundtrip`,
+that writes to the real Decorations Database sheet: it adds a throwaway award for a
+`awards_tui_rust_smoke` user, then deletes it. It's excluded from the default `cargo test` run and
+from CI because it needs real network access and a logged-in `token.json` (run `awards-tui --login`
+first, see the main `README.md` Setup section). To run it:
+
+```bash
+cargo test -p awards-sheets -- --ignored
+```
+
 ## Signed commits
 
 Commits on `master` should be **GPG-signed** so GitHub shows them as Verified.

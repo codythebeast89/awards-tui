@@ -1,8 +1,8 @@
 class AwardsTui < Formula
   desc "Look up and edit FORSCOM decorations (Ratatui TUI)"
   homepage "https://github.com/codythebeast89/awards-tui"
-  url "https://github.com/codythebeast89/awards-tui/archive/refs/tags/v2.3.0.tar.gz"
-  sha256 "3dbe2582fb879cdbc52f63cb53685e8f488525e0c12c96ad1b8fc3fd64f313f3"
+  url "https://github.com/codythebeast89/awards-tui/archive/refs/tags/v2.4.0.tar.gz"
+  sha256 "656679fb3962286f7ffef7e730838aa6fdd71b704ce06706b1c506ca62369bd7"
   license "MIT"
   head "https://github.com/codythebeast89/awards-tui.git", branch: "master"
 

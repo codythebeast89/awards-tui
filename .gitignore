@@ -21,6 +21,7 @@ audit-*.txt
 /target/
 **/*.rs.bk
 .claude/skills/
+.agents/skills/
 .specify/
 
 # graphify (knowledge-graph tooling) - graphify-out/ itself is committed so the

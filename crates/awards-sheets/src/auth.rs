@@ -11,8 +11,10 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-pub const SCOPES: &[&str] = &["https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.readonly"];
+pub const SCOPES: &[&str] = &[
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive.readonly",
+];
 
 const CREDENTIALS_NAMES: &[&str] = &[
     "credentials.json",

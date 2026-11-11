@@ -118,7 +118,9 @@ impl AuditFinding {
                     "conflicting rows"
                 };
                 Some(Award {
-                    category: sheet_meta(sheet).map(|m| m.category.to_string()).unwrap_or_default(),
+                    category: sheet_meta(sheet)
+                        .map(|m| m.category.to_string())
+                        .unwrap_or_default(),
                     name: format!("⚠ {base_name} ({label})"),
                     sheet: sheet.clone(),
                     col: col.clone(),
@@ -135,7 +137,9 @@ impl AuditFinding {
                 cell,
                 ..
             } => Some(Award {
-                category: sheet_meta(sheet).map(|m| m.category.to_string()).unwrap_or_default(),
+                category: sheet_meta(sheet)
+                    .map(|m| m.category.to_string())
+                    .unwrap_or_default(),
                 name: format!("⚠ {base_name} (malformed cell)"),
                 sheet: sheet.clone(),
                 col: col.clone(),

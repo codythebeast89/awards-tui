@@ -174,12 +174,10 @@ pub fn build_awards_data(columns: Option<Vec<AwardColumn>>) -> Result<AwardsData
 
     let mut sheet_rows = HashMap::new();
     for handle in handles {
-        let (name, rows) = handle
-            .join()
-            .map_err(|_| SheetsError::Network {
-                sheet: "(unknown)".into(),
-                reason: "sheet fetch thread panicked".into(),
-            })??;
+        let (name, rows) = handle.join().map_err(|_| SheetsError::Network {
+            sheet: "(unknown)".into(),
+            reason: "sheet fetch thread panicked".into(),
+        })??;
         sheet_rows.insert(name, rows);
     }
     Ok(build_awards_data_from_rows(sheet_rows, columns))

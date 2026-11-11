@@ -32,9 +32,10 @@ pub use meta::{
     SHEET_NAMES, USER_AGENT,
 };
 pub use parse::{
-    build_cell_value, cell_format_issues, clean_cell, extract_paste_fields, find_first_empty_row,
-    match_catalog_entries, match_row_in_window, normalize_username, parse_bare_username,
-    replace_username_in_cell, split_award_suffix, usernames_similar,
+    build_cell_value, cell_format_issues, clean_cell, extract_paste_fields,
+    extract_username_display, find_first_empty_row, match_catalog_entries, match_row_in_window,
+    normalize_username, parse_bare_username, replace_username_in_cell, split_award_suffix,
+    usernames_similar,
 };
 pub use types::{Award, AwardDef, AwardsData, DuplicateHit, ExtractedRequest};
 

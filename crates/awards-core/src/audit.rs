@@ -717,7 +717,10 @@ mod finding_tests {
             ),
             "header/summary block changed:\n{body}"
         );
-        assert!(body.ends_with("End of report.\n"), "footer changed:\n{body}");
+        assert!(
+            body.ends_with("End of report.\n"),
+            "footer changed:\n{body}"
+        );
 
         // Section headers appear, in order, exactly as before.
         let headers = [
@@ -761,7 +764,11 @@ mod finding_tests {
             .iter()
             .filter(|f| matches!(f, AuditFinding::DuplicateRow { .. }))
             .collect();
-        assert_eq!(dup_rows.len(), 3, "a 3-row duplicate group must yield 3 findings");
+        assert_eq!(
+            dup_rows.len(),
+            3,
+            "a 3-row duplicate group must yield 3 findings"
+        );
     }
 
     #[test]
@@ -793,7 +800,10 @@ mod finding_tests {
     #[test]
     fn flatten_is_stable_across_calls() {
         let report = sample_report();
-        assert_eq!(flatten_audit_findings(&report), flatten_audit_findings(&report));
+        assert_eq!(
+            flatten_audit_findings(&report),
+            flatten_audit_findings(&report)
+        );
     }
 
     #[test]

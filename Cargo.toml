@@ -8,7 +8,7 @@ members = [
 default-members = ["crates/awards-tui"]
 
 [workspace.package]
-version = "2.4.0"
+version = "2.4.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/codythebeast89/awards-tui"
@@ -23,7 +23,7 @@ crossterm = "0.29"
 csv = "1"
 dirs = "6"
 getrandom = "0.2"
-jsonwebtoken = { version = "10.3", default-features = false, features = ["use_pem", "rust_crypto"] }
+jsonwebtoken = { version = "11", default-features = false, features = ["use_pem", "rust_crypto"] }
 open = "5"
 ratatui = "0.30"
 regex = "1"
@@ -35,3 +35,9 @@ strsim = "0.11"
 toml = "0.8"
 tui-input = "0.15"
 urlencoding = "2"
+
+[profile.dev]
+incremental = false
+
+[profile.release]
+incremental = false

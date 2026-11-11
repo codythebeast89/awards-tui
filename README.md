@@ -1,6 +1,6 @@
 # Awards TUI
 
-Terminal UI to look up and edit awards in the [Decorations Database](https://docs.google.com/spreadsheets/d/1e_AqHIGrGdfNSgoHt6kLV89E6LADJmlZzhfRAUXo0wY) Google Sheet.
+Terminal UI to look up and edit awards in the [Decorations Database](https://docs.google.com/spreadsheets/d/1e_AqHIGrGdfNSgoHt6kLV89E6LADJmlZzhfRAUXo0wY/edit?gid=1248532695#gid=1248532695) Google Sheet.
 
 Tabs used: **Badges Database**, **Ribbons Database**, **Foreign Awards Database**.
 

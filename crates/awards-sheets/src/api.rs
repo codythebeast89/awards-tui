@@ -96,9 +96,8 @@ impl SheetsApi {
         if ranges.is_empty() {
             return Ok(());
         }
-        let url = format!(
-            "https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values:batchUpdate"
-        );
+        let url =
+            format!("https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values:batchUpdate");
         let mut written = 0usize;
         for chunk in ranges.chunks(50) {
             let data: Vec<serde_json::Value> = chunk

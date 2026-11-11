@@ -1,12 +1,12 @@
 use crate::config::AppConfig;
 use awards_core::{
     awards_excluding_duplicate_rows, check_assist, col_to_index, collect_sheet_audit,
-    extract_paste_fields, find_duplicates_for_user, find_grant_target, finding_username,
-    flatten_audit_findings, flatten_awards_sorted, format_audit_report, get_awards_for_username,
-    match_catalog_entries, normalize_username, owned_award_columns, parse_bare_username,
-    reindex_column_after_delete, row_offset, shift_column_up_in_rows, split_award_suffix,
-    upsert_award_in_index, AssistVerdict, Award, AwardDef, AuditFinding, AwardsData,
-    CATEGORY_LABELS, GrantPlan,
+    extract_paste_fields, extract_username_display, find_duplicates_for_user, find_grant_target,
+    finding_username, flatten_audit_findings, flatten_awards_sorted, format_audit_report,
+    get_awards_for_username, match_catalog_entries, normalize_username, owned_award_columns,
+    parse_bare_username, reindex_column_after_delete, row_offset, shift_column_up_in_rows,
+    split_award_suffix, upsert_award_in_index, AssistVerdict, AuditFinding, Award, AwardDef,
+    AwardsData, GrantPlan, CATEGORY_LABELS,
 };
 use awards_sheets::{
     add_award_to_user, auth_status, award_with_live_row, build_awards_data, project_root,
@@ -286,10 +286,7 @@ impl AuditModal {
 pub enum AuditView {
     List,
     Report,
-    ChooseUsername {
-        a: String,
-        b: String,
-    },
+    ChooseUsername { a: String, b: String },
 }
 
 #[derive(Debug, Clone)]
@@ -429,7 +426,9 @@ pub(crate) fn describe_finding(finding: &AuditFinding) -> String {
         } => {
             format!("⚠ {base_name} (malformed cell \"{cell}\") · {sheet} {col}{row}")
         }
-        AuditFinding::SimilarUsernames { a, b, base_name, .. } => {
+        AuditFinding::SimilarUsernames {
+            a, b, base_name, ..
+        } => {
             format!("⚠ {base_name}: @{a} vs @{b} (similar usernames)")
         }
         AuditFinding::UnparseableCell {
@@ -757,7 +756,7 @@ impl App {
             patch_sheet_cell(data, award);
             let new_key = normalize_username(Some(&award.cell));
             if let Some(viewed) = self.results_username.clone() {
-                if new_key.as_deref() != Some(viewed.as_str()) {
+                if new_key != normalize_username(Some(&viewed)) {
                     self.apply_user_view(
                         &viewed,
                         None,
@@ -848,7 +847,12 @@ impl App {
                 }
                 "delete" => {
                     if let Some(award) = self.pending_delete.take() {
-                        reindex_column_after_delete(&mut data.index, &award.sheet, &award.col, award.row);
+                        reindex_column_after_delete(
+                            &mut data.index,
+                            &award.sheet,
+                            &award.col,
+                            award.row,
+                        );
                         if let Some(rows) = data.sheet_rows.get_mut(&award.sheet) {
                             shift_column_up_in_rows(rows, &award.sheet, &award.col, award.row);
                         }
@@ -1061,7 +1065,8 @@ impl App {
                             let raw = rename.input.value().trim();
                             if let Some(display_new) = parse_bare_username(raw) {
                                 let new_key = display_new.to_ascii_lowercase();
-                                if new_key == rename.from {
+                                let from_key = rename.from.to_ascii_lowercase();
+                                if new_key == from_key {
                                     status = Some(
                                         "New username is the same as the current name".to_string(),
                                     );
@@ -1069,9 +1074,8 @@ impl App {
                                     rename.step = RenameStep::Confirm;
                                 }
                             } else {
-                                status = Some(
-                                    "Enter a bare Roblox username (no suffixes)".to_string(),
-                                );
+                                status =
+                                    Some("Enter a bare Roblox username (no suffixes)".to_string());
                             }
                         }
                         _ => {
@@ -1406,7 +1410,8 @@ impl App {
                 } else {
                     award.cell.clone()
                 };
-                self.audit_fix_username = Some(finding_username(&finding).unwrap_or("?").to_string());
+                self.audit_fix_username =
+                    Some(finding_username(&finding).unwrap_or("?").to_string());
                 self.saved_audit = Some(audit);
                 self.status = "Fix the malformed cell, then Enter to save".to_string();
                 self.modal = Some(Modal::Edit(EditModal {
@@ -1527,12 +1532,10 @@ impl App {
 
     fn action_lookup(&mut self) {
         let raw = self.username.value();
-        let username = normalize_username(Some(raw))
-            .unwrap_or_else(|| raw.trim().trim_start_matches('@').to_ascii_lowercase());
-        if username.is_empty() {
+        let Some(username) = extract_username_display(Some(raw)) else {
             self.status = "Enter a username".to_string();
             return;
-        }
+        };
         if self.data.is_none() {
             self.status = "Still loading awards...".to_string();
             return;
@@ -1667,7 +1670,7 @@ impl App {
             .iter()
             .chain(self.duplicates.iter())
             .filter(|award| {
-                normalize_username(Some(&award.cell)).as_deref() == Some(from.as_str())
+                normalize_username(Some(&award.cell)) == normalize_username(Some(&from))
                     && !award.sheet.is_empty()
                     && !award.col.is_empty()
                     && award.row != 0
@@ -1874,13 +1877,7 @@ impl App {
             // remaining cells stay visible. Success jumps to the new name.
             let view_user = if result.ok {
                 parse_bare_username(&new_username)
-                    .map(|name| name.to_ascii_lowercase())
-                    .unwrap_or_else(|| {
-                        new_username
-                            .trim()
-                            .trim_start_matches('@')
-                            .to_ascii_lowercase()
-                    })
+                    .unwrap_or_else(|| new_username.trim().trim_start_matches('@').to_string())
             } else {
                 old_username
             };
@@ -2101,8 +2098,7 @@ fn move_audit_row(list: &AuditFindingsList, state: &mut ListState, delta: isize)
         .iter()
         .position(|&row| row == current_row)
         .unwrap_or(0);
-    let next_pos =
-        (current_pos as isize + delta).rem_euclid(selectable.len() as isize) as usize;
+    let next_pos = (current_pos as isize + delta).rem_euclid(selectable.len() as isize) as usize;
     state.select(Some(selectable[next_pos]));
 }
 
@@ -2244,13 +2240,44 @@ mod tests {
         }
     }
 
+    // ---------- Lookup preserves typed username casing for subsequent adds ----------
+
+    #[test]
+    fn lookup_preserves_typed_username_casing() {
+        let (mut app, _rx) = test_app();
+        // Index keys are lowercase; lookup must still keep the clerk's typed casing so
+        // commit_add writes CodyTheBeast89 rather than codythebeast89.
+        app.data = Some(awards_data_with(
+            "codythebeast89",
+            vec![award(
+                "Army Service",
+                "Army Service",
+                "Ribbons Database",
+                "C",
+                5,
+                "CodyTheBeast89",
+            )],
+        ));
+        app.username = input_with_value("CodyTheBeast89".into());
+        app.action_lookup();
+        assert_eq!(app.results_username.as_deref(), Some("CodyTheBeast89"));
+        assert_eq!(app.results.len(), 1);
+    }
+
     // ---------- Esc cancels whatever modal is open ----------
 
     #[test]
     fn esc_closes_edit_modal_and_reports_cancelled() {
         let (mut app, _rx) = test_app();
         app.modal = Some(Modal::Edit(EditModal {
-            award: award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice"),
+            award: award(
+                "Combat Action Badge",
+                "Combat Action Badge",
+                "Badges Database",
+                "C",
+                10,
+                "alice",
+            ),
             input: input_with_value("alice".into()),
         }));
         app.handle_key(key(KeyCode::Esc));
@@ -2282,7 +2309,11 @@ mod tests {
         let (mut app, _rx) = test_app();
         app.data = Some(AwardsData::default());
         app.results_username = Some("alice".into());
-        app.modal = Some(Modal::Assist(assist_modal("alice", "MCAB", AssistStep::Query)));
+        app.modal = Some(Modal::Assist(assist_modal(
+            "alice",
+            "MCAB",
+            AssistStep::Query,
+        )));
         app.action_add();
         assert!(
             matches!(app.modal, Some(Modal::Assist(_))),
@@ -2306,8 +2337,18 @@ mod tests {
     #[test]
     fn action_edit_opens_prefilled_with_the_selected_awards_cell() {
         let (mut app, _rx) = test_app();
-        let a = award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice x2");
-        app.visible = vec![VisibleAward { award: a.clone(), warning: false }];
+        let a = award(
+            "Combat Action Badge",
+            "Combat Action Badge",
+            "Badges Database",
+            "C",
+            10,
+            "alice x2",
+        );
+        app.visible = vec![VisibleAward {
+            award: a.clone(),
+            warning: false,
+        }];
         app.awards_state.select(Some(0));
         app.action_edit();
         match &app.modal {
@@ -2386,7 +2427,10 @@ mod tests {
         app.modal = Some(Modal::Add(add));
         app.handle_key(key(KeyCode::Enter));
         assert!(app.modal.is_none(), "confirming Add should close the modal");
-        assert!(app.busy, "confirming Add should mark the app busy while the write runs");
+        assert!(
+            app.busy,
+            "confirming Add should mark the app busy while the write runs"
+        );
         assert_eq!(app.status, format!("Writing {}...", def.base_name));
     }
 
@@ -2395,14 +2439,24 @@ mod tests {
     #[test]
     fn delete_modal_requires_the_word_delete() {
         let (mut app, _rx) = test_app();
-        let a = award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice");
+        let a = award(
+            "Combat Action Badge",
+            "Combat Action Badge",
+            "Badges Database",
+            "C",
+            10,
+            "alice",
+        );
         app.modal = Some(Modal::Delete(DeleteModal {
             award: a,
             input: input_with_value("nope".into()),
             viewed_username: "alice".into(),
         }));
         app.handle_key(key(KeyCode::Enter));
-        assert!(app.modal.is_some(), "wrong confirmation text must not close the modal");
+        assert!(
+            app.modal.is_some(),
+            "wrong confirmation text must not close the modal"
+        );
         assert!(!app.busy);
         assert_eq!(app.status, "Type \"delete\" to confirm");
     }
@@ -2410,7 +2464,14 @@ mod tests {
     #[test]
     fn delete_modal_confirms_case_insensitively_and_commits() {
         let (mut app, _rx) = test_app();
-        let a = award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice");
+        let a = award(
+            "Combat Action Badge",
+            "Combat Action Badge",
+            "Badges Database",
+            "C",
+            10,
+            "alice",
+        );
         app.modal = Some(Modal::Delete(DeleteModal {
             award: a.clone(),
             input: input_with_value("DELETE".into()),
@@ -2489,7 +2550,14 @@ mod tests {
         let (mut app, _rx) = test_app();
         app.data = Some(awards_data_with(
             "bob",
-            vec![award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 11, "bob")],
+            vec![award(
+                "Combat Action Badge",
+                "Combat Action Badge",
+                "Badges Database",
+                "C",
+                11,
+                "bob",
+            )],
         ));
         app.modal = Some(Modal::Rename(RenameModal {
             from: "alice".into(),
@@ -2520,7 +2588,10 @@ mod tests {
             step: RenameStep::Confirm,
         }));
         app.handle_key(key(KeyCode::Enter));
-        assert!(app.modal.is_some(), "wrong confirm text must not close the modal");
+        assert!(
+            app.modal.is_some(),
+            "wrong confirm text must not close the modal"
+        );
         assert_eq!(app.status, "Type \"rename\" to confirm");
     }
 
@@ -2564,11 +2635,29 @@ mod tests {
         app.data = Some(awards_data_with(
             "alice",
             vec![
-                award("Expert Soldier Badge", "Expert Soldier Badge", "Badges Database", "D", 10, "alice"),
-                award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice"),
+                award(
+                    "Expert Soldier Badge",
+                    "Expert Soldier Badge",
+                    "Badges Database",
+                    "D",
+                    10,
+                    "alice",
+                ),
+                award(
+                    "Combat Action Badge",
+                    "Combat Action Badge",
+                    "Badges Database",
+                    "C",
+                    10,
+                    "alice",
+                ),
             ],
         ));
-        app.modal = Some(Modal::Assist(assist_modal("alice", "MCAB", AssistStep::Query)));
+        app.modal = Some(Modal::Assist(assist_modal(
+            "alice",
+            "MCAB",
+            AssistStep::Query,
+        )));
         app.handle_key(key(KeyCode::Enter));
         match &app.modal {
             Some(Modal::Assist(assist)) => {
@@ -2586,9 +2675,20 @@ mod tests {
         let (mut app, _rx) = test_app();
         app.data = Some(awards_data_with(
             "alice",
-            vec![award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice")],
+            vec![award(
+                "Combat Action Badge",
+                "Combat Action Badge",
+                "Badges Database",
+                "C",
+                10,
+                "alice",
+            )],
         ));
-        app.modal = Some(Modal::Assist(assist_modal("alice", "MCAB", AssistStep::Query)));
+        app.modal = Some(Modal::Assist(assist_modal(
+            "alice",
+            "MCAB",
+            AssistStep::Query,
+        )));
         app.handle_key(key(KeyCode::Enter));
         match &app.modal {
             Some(Modal::Assist(assist)) => {
@@ -2610,7 +2710,10 @@ mod tests {
         assist.report = "DENY ...".into();
         app.modal = Some(Modal::Assist(assist));
         app.handle_key(key(KeyCode::Enter));
-        assert!(app.modal.is_some(), "modal should stay open when nothing can be granted");
+        assert!(
+            app.modal.is_some(),
+            "modal should stay open when nothing can be granted"
+        );
         assert!(!app.busy);
         assert_eq!(app.status, "unchanged");
     }
@@ -2619,7 +2722,11 @@ mod tests {
     fn assist_result_scroll_is_saturating_and_moves_with_j_k() {
         let (mut app, _rx) = test_app();
         app.data = Some(AwardsData::default());
-        app.modal = Some(Modal::Assist(assist_modal("alice", "MCAB", AssistStep::Result)));
+        app.modal = Some(Modal::Assist(assist_modal(
+            "alice",
+            "MCAB",
+            AssistStep::Result,
+        )));
         app.handle_key(key(KeyCode::Up)); // saturating_sub(1) from 0 stays 0
         match &app.modal {
             Some(Modal::Assist(assist)) => assert_eq!(assist.scroll, 0),
@@ -2638,8 +2745,22 @@ mod tests {
         app.data = Some(awards_data_with(
             "alice",
             vec![
-                award("Expert Soldier Badge", "Expert Soldier Badge", "Badges Database", "D", 10, "alice"),
-                award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice"),
+                award(
+                    "Expert Soldier Badge",
+                    "Expert Soldier Badge",
+                    "Badges Database",
+                    "D",
+                    10,
+                    "alice",
+                ),
+                award(
+                    "Combat Action Badge",
+                    "Combat Action Badge",
+                    "Badges Database",
+                    "C",
+                    10,
+                    "alice",
+                ),
             ],
         ));
         let mut assist = assist_modal("alice", "MCAB", AssistStep::Result);
@@ -2650,8 +2771,14 @@ mod tests {
         });
         app.modal = Some(Modal::Assist(assist));
         app.handle_key(key(KeyCode::Enter));
-        assert!(app.modal.is_none(), "granting should close the Assist modal");
-        assert!(app.busy, "granting dispatches a sheet write (via commit_edit)");
+        assert!(
+            app.modal.is_none(),
+            "granting should close the Assist modal"
+        );
+        assert!(
+            app.busy,
+            "granting dispatches a sheet write (via commit_edit)"
+        );
     }
 
     // ---------- Audit modal: scroll only, Esc handled above ----------
@@ -2876,7 +3003,10 @@ mod tests {
             }
             other => panic!("expected Delete modal, got {other:?}"),
         }
-        assert!(app.saved_audit.is_some(), "the audit list must be stashed for Esc/failure to restore");
+        assert!(
+            app.saved_audit.is_some(),
+            "the audit list must be stashed for Esc/failure to restore"
+        );
         assert_eq!(app.audit_fix_username.as_deref(), Some("alice"));
     }
 
@@ -2917,10 +3047,15 @@ mod tests {
 
         app.handle_key(key(KeyCode::Esc));
         match &app.modal {
-            Some(Modal::Audit(audit)) => assert_eq!(audit.list.len(), 1, "the finding is still there"),
+            Some(Modal::Audit(audit)) => {
+                assert_eq!(audit.list.len(), 1, "the finding is still there")
+            }
             other => panic!("expected Esc to restore the Audit modal, got {other:?}"),
         }
-        assert!(app.saved_audit.is_none(), "the stash must be cleared once restored");
+        assert!(
+            app.saved_audit.is_none(),
+            "the stash must be cleared once restored"
+        );
         assert!(app.audit_fix_username.is_none());
     }
 
@@ -2929,7 +3064,14 @@ mod tests {
         let (mut app, _rx) = test_app();
         app.data = Some(awards_data_with(
             "bobb",
-            vec![award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "bobb")],
+            vec![award(
+                "Combat Action Badge",
+                "Combat Action Badge",
+                "Badges Database",
+                "C",
+                10,
+                "bobb",
+            )],
         ));
         let finding = similar_usernames_finding();
         app.modal = Some(Modal::Audit(AuditModal::new(
@@ -2985,7 +3127,14 @@ mod tests {
         let (mut app, _rx) = test_app();
         app.data = Some(awards_data_with(
             "bobb",
-            vec![award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "bobb")],
+            vec![award(
+                "Combat Action Badge",
+                "Combat Action Badge",
+                "Badges Database",
+                "C",
+                10,
+                "bobb",
+            )],
         ));
         let finding = similar_usernames_finding();
         app.modal = Some(Modal::Audit(AuditModal::new(
@@ -3037,7 +3186,11 @@ mod tests {
                     matches!(audit.view, AuditView::List),
                     "no sub-dialog or fix flow opens for an unparseable cell"
                 );
-                assert_eq!(audit.list.len(), 1, "the finding is still there — nothing selects it away");
+                assert_eq!(
+                    audit.list.len(),
+                    1,
+                    "the finding is still there — nothing selects it away"
+                );
             }
             other => panic!("expected the Audit modal to remain open and unchanged, got {other:?}"),
         }
@@ -3067,22 +3220,46 @@ mod tests {
             Some(Modal::Audit(audit)) => audit.list_state.selected(),
             _ => None,
         };
-        assert_eq!(selected(&app), Some(1), "constructor selects the first selectable row");
+        assert_eq!(
+            selected(&app),
+            Some(1),
+            "constructor selects the first selectable row"
+        );
 
         app.handle_key(key(KeyCode::Down));
-        assert_eq!(selected(&app), Some(3), "Down skips the carol header row (2)");
+        assert_eq!(
+            selected(&app),
+            Some(3),
+            "Down skips the carol header row (2)"
+        );
 
         app.handle_key(key(KeyCode::Down));
-        assert_eq!(selected(&app), Some(1), "Down from the last finding wraps to the first");
+        assert_eq!(
+            selected(&app),
+            Some(1),
+            "Down from the last finding wraps to the first"
+        );
 
         app.handle_key(key(KeyCode::Up));
-        assert_eq!(selected(&app), Some(3), "Up from the first finding wraps to the last");
+        assert_eq!(
+            selected(&app),
+            Some(3),
+            "Up from the first finding wraps to the last"
+        );
 
         app.handle_key(key(KeyCode::PageUp));
-        assert_eq!(selected(&app), Some(1), "PageUp(5) wraps by position, not by row index");
+        assert_eq!(
+            selected(&app),
+            Some(1),
+            "PageUp(5) wraps by position, not by row index"
+        );
 
         app.handle_key(key(KeyCode::PageDown));
-        assert_eq!(selected(&app), Some(3), "PageDown(5) wraps back to the last finding");
+        assert_eq!(
+            selected(&app),
+            Some(3),
+            "PageDown(5) wraps back to the last finding"
+        );
     }
 
     // ---------- Tab toggles between the findings list and the plain-text report ----------
@@ -3102,7 +3279,11 @@ mod tests {
         match &app.modal {
             Some(Modal::Audit(audit)) => {
                 assert!(matches!(audit.view, AuditView::Report));
-                assert_eq!(audit.list.len(), 1, "toggling to Report must not discard the findings list");
+                assert_eq!(
+                    audit.list.len(),
+                    1,
+                    "toggling to Report must not discard the findings list"
+                );
             }
             other => panic!("expected the Audit modal to stay open on Report, got {other:?}"),
         }
@@ -3111,7 +3292,11 @@ mod tests {
         match &app.modal {
             Some(Modal::Audit(audit)) => {
                 assert!(matches!(audit.view, AuditView::List));
-                assert_eq!(audit.list.len(), 1, "toggling back to List must still have the findings list");
+                assert_eq!(
+                    audit.list.len(),
+                    1,
+                    "toggling back to List must still have the findings list"
+                );
             }
             other => panic!("expected the Audit modal to stay open on List, got {other:?}"),
         }
@@ -3149,7 +3334,14 @@ mod tests {
     #[test]
     fn successful_write_from_a_finding_reopens_audit_with_a_refreshed_list() {
         let (mut app, _rx) = test_app();
-        let target = award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice");
+        let target = award(
+            "Combat Action Badge",
+            "Combat Action Badge",
+            "Badges Database",
+            "C",
+            10,
+            "alice",
+        );
         app.data = Some(awards_data_with("alice", vec![target.clone()]));
         let finding = duplicate_row_finding();
         app.modal = Some(Modal::Audit(AuditModal::new(
@@ -3174,7 +3366,10 @@ mod tests {
 
         match &app.modal {
             Some(Modal::Audit(audit)) => {
-                assert_eq!(audit.path, "audits/audit-x.txt", "reuses the same export path");
+                assert_eq!(
+                    audit.path, "audits/audit-x.txt",
+                    "reuses the same export path"
+                );
                 assert!(
                     audit.list.is_empty(),
                     "no sheet rows means nothing left to audit after the local patch"
@@ -3190,7 +3385,14 @@ mod tests {
     #[test]
     fn failed_write_from_a_finding_restores_the_saved_audit_unchanged() {
         let (mut app, _rx) = test_app();
-        let target = award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice");
+        let target = award(
+            "Combat Action Badge",
+            "Combat Action Badge",
+            "Badges Database",
+            "C",
+            10,
+            "alice",
+        );
         app.data = Some(awards_data_with("alice", vec![target]));
         let finding = duplicate_row_finding();
         app.modal = Some(Modal::Audit(AuditModal::new(
@@ -3215,7 +3417,11 @@ mod tests {
 
         match &app.modal {
             Some(Modal::Audit(audit)) => {
-                assert_eq!(audit.list.len(), 1, "the failed fix must not drop the finding")
+                assert_eq!(
+                    audit.list.len(),
+                    1,
+                    "the failed fix must not drop the finding"
+                )
             }
             other => panic!("expected the failed write to restore the Audit modal, got {other:?}"),
         }
@@ -3323,7 +3529,9 @@ mod tests {
             )],
         ));
         app.modal = Some(Modal::PasteAdd(PasteAddModal::default()));
-        app.handle_paste("ROBLOX Username: torba_f\nBadge Requested: Army Parachutist Badge".into());
+        app.handle_paste(
+            "ROBLOX Username: torba_f\nBadge Requested: Army Parachutist Badge".into(),
+        );
         app.handle_key(key(KeyCode::Enter));
         assert!(
             matches!(app.modal, Some(Modal::Add(_))),
@@ -3479,7 +3687,14 @@ mod tests {
     #[test]
     fn paste_into_edit_modal_appends_to_its_input() {
         let (mut app, _rx) = test_app();
-        let a = award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice");
+        let a = award(
+            "Combat Action Badge",
+            "Combat Action Badge",
+            "Badges Database",
+            "C",
+            10,
+            "alice",
+        );
         app.modal = Some(Modal::Edit(EditModal {
             award: a,
             input: input_with_value("alice".into()),
@@ -3494,7 +3709,14 @@ mod tests {
     #[test]
     fn paste_into_delete_modal_appends_to_its_confirmation_input() {
         let (mut app, _rx) = test_app();
-        let a = award("Combat Action Badge", "Combat Action Badge", "Badges Database", "C", 10, "alice");
+        let a = award(
+            "Combat Action Badge",
+            "Combat Action Badge",
+            "Badges Database",
+            "C",
+            10,
+            "alice",
+        );
         app.modal = Some(Modal::Delete(DeleteModal {
             award: a,
             input: input_with_value("del".into()),
@@ -3582,7 +3804,11 @@ mod tests {
     #[test]
     fn paste_into_assist_modal_query_step_appends_to_input() {
         let (mut app, _rx) = test_app();
-        app.modal = Some(Modal::Assist(assist_modal("alice", "MC", AssistStep::Query)));
+        app.modal = Some(Modal::Assist(assist_modal(
+            "alice",
+            "MC",
+            AssistStep::Query,
+        )));
         app.handle_paste("AB".into());
         match &app.modal {
             Some(Modal::Assist(assist)) => assert_eq!(assist.input.value(), "MCAB"),
@@ -3593,7 +3819,11 @@ mod tests {
     #[test]
     fn paste_into_assist_modal_result_step_is_a_no_op() {
         let (mut app, _rx) = test_app();
-        app.modal = Some(Modal::Assist(assist_modal("alice", "MCAB", AssistStep::Result)));
+        app.modal = Some(Modal::Assist(assist_modal(
+            "alice",
+            "MCAB",
+            AssistStep::Result,
+        )));
         app.handle_paste("ignored".into());
         match &app.modal {
             Some(Modal::Assist(assist)) => {
